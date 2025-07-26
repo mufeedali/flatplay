@@ -1,6 +1,6 @@
 [package]
 name = "flatplay"
-version = "0.2.0"
+version = "0.2.1"
 authors = ["Mufeed Ali <me@mufeed.dev>"]
 description = "Simple CLI tool to build and run Flatpak applications."
 readme = "README.md"
