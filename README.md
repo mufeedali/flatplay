@@ -68,6 +68,10 @@ Add the following tasks to your `tasks.json` file (you can open it with the `zed
   "command": "flatplay update-dependencies"
 },
 {
+  "label": "export flatpak bundle",
+  "command": "flatplay export-bundle"
+},
+{
   "label": "select flatpak manifest",
   "command": "flatplay select-manifest"
 }
