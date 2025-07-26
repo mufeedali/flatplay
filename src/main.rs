@@ -35,6 +35,8 @@ enum Commands {
     RuntimeTerminal,
     /// Spawn a new terminal inside the current build repository
     BuildTerminal,
+    /// Export .flatpak bundle from the build
+    ExportBundle,
     /// Select or change the active manifest
     SelectManifest {
         /// Path to the manifest file to select
@@ -154,6 +156,7 @@ fn main() {
         Some(Commands::Clean) => handle_command!(flatpak_manager.clean()),
         Some(Commands::RuntimeTerminal) => handle_command!(flatpak_manager.runtime_terminal()),
         Some(Commands::BuildTerminal) => handle_command!(flatpak_manager.build_terminal()),
+        Some(Commands::ExportBundle) => handle_command!(flatpak_manager.export_bundle()),
         Some(Commands::SelectManifest { path }) => {
             handle_command!(flatpak_manager.select_manifest(path.clone()))
         }

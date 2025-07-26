@@ -415,6 +415,82 @@ impl<'a> FlatpakManager<'a> {
         run_command("flatpak", &args_str, Some(self.state.base_dir.as_path()))
     }
 
+    pub fn export_bundle(&self) -> Result<()> {
+        if !self.state.application_built {
+            println!(
+                "{}",
+                "Application not built. Please run `build` first.".yellow()
+            );
+            return Ok(());
+        }
+
+        // Check if build is initialized
+        if !self.is_build_initialized()? {
+            println!(
+                "{}",
+                "Build not initialized. Please run `build` first.".yellow()
+            );
+            return Ok(());
+        }
+
+        let manifest = self.manifest.as_ref().unwrap();
+        let repo_dir = self.build_dir().join("repo");
+        let finalized_repo_dir = self.build_dir().join("finalized-repo");
+        let ostree_dir = self.build_dir().join("ostree");
+
+        // Remove finalized repo
+        if finalized_repo_dir.is_dir() {
+            fs::remove_dir_all(&finalized_repo_dir)?;
+        }
+
+        // Copy repo
+        run_command(
+            "cp",
+            &[
+                "-r",
+                repo_dir.to_str().unwrap(),
+                finalized_repo_dir.to_str().unwrap(),
+            ],
+            Some(self.state.base_dir.as_path()),
+        )?;
+
+        // Finalize build
+        let mut args = vec!["build-finish".to_string()];
+
+        for arg in &manifest.finish_args {
+            args.push(arg.clone());
+        }
+        args.push(format!("--command={}", manifest.command.clone()));
+        args.push(finalized_repo_dir.to_str().unwrap().to_string());
+
+        let args_str: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+
+        run_command("flatpak", &args_str, Some(self.state.base_dir.as_path()))?;
+
+        // Export build
+        run_command(
+            "flatpak",
+            &[
+                "build-export",
+                ostree_dir.to_str().unwrap(),
+                finalized_repo_dir.to_str().unwrap(),
+            ],
+            Some(self.state.base_dir.as_path()),
+        )?;
+
+        // Bundle build
+        run_command(
+            "flatpak",
+            &[
+                "build-bundle",
+                ostree_dir.to_str().unwrap(),
+                format!("{}.flatpak", manifest.id.clone()).as_str(),
+                manifest.id.clone().as_str(),
+            ],
+            Some(self.state.base_dir.as_path()),
+        )
+    }
+
     pub fn clean(&mut self) -> Result<()> {
         let build_dir = self.build_dir();
         if fs::metadata(&build_dir).is_ok() {
