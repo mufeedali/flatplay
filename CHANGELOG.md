@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2](https://github.com/mufeedali/flatplay/compare/v0.2.1...v0.2.2) - 2025-08-02
+
+### Fixed
+
+- remove unnecessary print
+- make sure build init check only happens once
+
+### Other
+
+- re-org build dirs
+- more cleanup
+- re-org build_application
+
 ## [0.2.1](https://github.com/mufeedali/flatplay/compare/v0.2.0...v0.2.1) - 2025-07-26
 
 ### Added
