@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3](https://github.com/mufeedali/flatplay/compare/v0.2.2...v0.2.3) - 2025-08-03
+
+### Fixed
+
+- Show error for qmake build system
+- add bind mount for document portal fuse when running app ([#8](https://github.com/mufeedali/flatplay/pull/8))
+
 ## [0.2.2](https://github.com/mufeedali/flatplay/compare/v0.2.1...v0.2.2) - 2025-08-02
 
 ### Fixed
