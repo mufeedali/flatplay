@@ -9,9 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.3.0](https://github.com/mufeedali/flatplay/compare/v0.2.3...v0.3.0) - 2025-08-03
 
+### Removed
+
+- [**breaking**] **Removed the library**: The library was too tightly coupled with the CLI and wasn't really straightforward to use anyway.
+
 ### Added
 
-- [**breaking**] Add rebuild and remove library
+- Show some information from the selected manifest when running Flatplay.
+- `rebuild` command that performs a cleanup follow'ed by a build.
 
 ## [0.2.3](https://github.com/mufeedali/flatplay/compare/v0.2.2...v0.2.3) - 2025-08-03
 
