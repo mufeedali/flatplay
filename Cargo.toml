@@ -22,7 +22,7 @@ colored = "3.0.0"
 walkdir = "2.5.0"
 clap_complete = "4.5.55"
 regex = "1.11.1"
-nix = { version = "0.30.1", features = ["process", "signal"] }
+nix = { version = "0.30.1", features = ["process", "signal", "user"] }
 
 [[bin]]
 name = "flatplay"

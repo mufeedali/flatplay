@@ -11,10 +11,11 @@ use std::path::PathBuf;
 use anyhow::Result;
 use colored::*;
 use command::{flatpak_builder, run_command};
-use dialoguer::{theme::ColorfulTheme, Select};
+use dialoguer::{Select, theme::ColorfulTheme};
+use nix::unistd::geteuid;
 
 use crate::build_dirs::BuildDirs;
-use crate::manifest::{find_manifests_in_path, Manifest, Module};
+use crate::manifest::{Manifest, Module, find_manifests_in_path};
 use crate::process::kill_process_group;
 use crate::state::State;
 use crate::utils::{get_a11y_bus_args, get_host_env};
@@ -355,6 +356,12 @@ impl<'a> FlatpakManager<'a> {
             "build",
             "--with-appdir",
             "--allow=devel",
+            format!(
+                "--bind-mount=/run/user/{user_id}/doc=/run/user/{user_id}/doc/by-app/{app_id}",
+                user_id = geteuid(),
+                app_id = manifest.id
+            )
+            .as_str(),
             "--talk-name=org.freedesktop.portal.*",
             "--talk-name=org.a11y.Bus",
         ]
