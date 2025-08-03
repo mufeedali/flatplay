@@ -16,7 +16,7 @@ impl BuildDirs {
     pub fn repo_dir(&self) -> PathBuf {
         self.build_dir().join("repo")
     }
-    pub fn build_subdir(&self) -> PathBuf {
+    pub fn build_system_dir(&self) -> PathBuf {
         self.build_dir().join("_build")
     }
     pub fn flatpak_builder_dir(&self) -> PathBuf {

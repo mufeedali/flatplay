@@ -133,6 +133,9 @@ impl<'a> FlatpakManager<'a> {
                             self.run_cmake(repo_dir_str, config_opts.as_ref())?
                         }
                         Some("simple") => self.run_simple(repo_dir_str, build_commands.as_ref())?,
+                        Some("qmake") => {
+                            return Err(anyhow::anyhow!("qmake build system is not supported."));
+                        }
                         _ => self.run_autotools(repo_dir_str, config_opts.as_ref())?,
                     }
                     if let Some(post_install) = post_install {
@@ -152,7 +155,7 @@ impl<'a> FlatpakManager<'a> {
     }
 
     fn run_meson(&self, repo_dir_str: &str, config_opts: Option<&Vec<String>>) -> Result<()> {
-        let build_dir = self.build_dirs.build_subdir();
+        let build_dir = self.build_dirs.build_system_dir();
         let build_dir_str = build_dir.to_str().unwrap();
         let mut meson_args = vec!["build", repo_dir_str, "meson", "setup"];
         if let Some(opts) = config_opts {
@@ -180,7 +183,7 @@ impl<'a> FlatpakManager<'a> {
     }
 
     fn run_cmake(&self, repo_dir_str: &str, config_opts: Option<&Vec<String>>) -> Result<()> {
-        let build_dir = self.build_dirs.build_subdir();
+        let build_dir = self.build_dirs.build_system_dir();
         let build_dir_str = build_dir.to_str().unwrap();
         let b_flag = format!("-B{build_dir_str}");
         let mut cmake_args = vec![

@@ -6,9 +6,9 @@ use clap::{CommandFactory, Parser, Subcommand};
 use colored::*;
 use nix::unistd::{getpid, setpgid};
 
+use flatplay::FlatpakManager;
 use flatplay::process::{is_process_running, kill_process_group};
 use flatplay::state::State;
-use flatplay::FlatpakManager;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
