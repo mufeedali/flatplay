@@ -6,9 +6,17 @@ use clap::{CommandFactory, Parser, Subcommand};
 use colored::*;
 use nix::unistd::{getpid, setpgid};
 
-use flatplay::FlatpakManager;
-use flatplay::process::{is_process_running, kill_process_group};
-use flatplay::state::State;
+mod build_dirs;
+mod command;
+mod flatpak_manager;
+mod manifest;
+mod process;
+mod state;
+mod utils;
+
+use flatpak_manager::FlatpakManager;
+use process::{is_process_running, kill_process_group};
+use state::State;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -23,6 +31,8 @@ enum Commands {
     Build,
     /// Build or rebuild the application then run it
     BuildAndRun,
+    /// Clean the Flatpak repo directory and rebuild the application
+    Rebuild,
     /// Stop the currently running task
     Stop,
     /// Run the application
@@ -149,6 +159,7 @@ fn main() {
 
         Some(Commands::Build) => handle_command!(flatpak_manager.build()),
         Some(Commands::BuildAndRun) => handle_command!(flatpak_manager.build_and_run()),
+        Some(Commands::Rebuild) => handle_command!(flatpak_manager.rebuild()),
         Some(Commands::Run) => handle_command!(flatpak_manager.run()),
         Some(Commands::UpdateDependencies) => {
             handle_command!(flatpak_manager.update_dependencies())

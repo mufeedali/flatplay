@@ -27,7 +27,3 @@ nix = { version = "0.30.1", features = ["process", "signal", "user"] }
 [[bin]]
 name = "flatplay"
 path = "src/main.rs"
-
-[lib]
-name = "flatplay"
-path = "src/lib.rs"

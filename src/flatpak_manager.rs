@@ -1,22 +1,14 @@
-mod build_dirs;
-mod command;
-mod manifest;
-pub mod process;
-pub mod state;
-mod utils;
-
 use std::fs;
 use std::path::PathBuf;
 
 use anyhow::Result;
 use colored::*;
-use command::{flatpak_builder, run_command};
 use dialoguer::{Select, theme::ColorfulTheme};
 use nix::unistd::geteuid;
 
 use crate::build_dirs::BuildDirs;
+use crate::command::{flatpak_builder, run_command};
 use crate::manifest::{Manifest, Module, find_manifests_in_path};
-use crate::process::kill_process_group;
 use crate::state::State;
 use crate::utils::{get_a11y_bus_args, get_host_env};
 
@@ -46,13 +38,22 @@ impl<'a> FlatpakManager<'a> {
     fn auto_select_manifest(&mut self) -> Result<bool> {
         let manifests = self.find_manifests()?;
         if let Some(manifest_path) = manifests.first() {
-            self.state.active_manifest = Some(manifest_path.clone());
-            self.state.save()?;
             println!("{} {:?}", "Auto-selected manifest:".green(), manifest_path);
-            self.manifest = Some(Manifest::from_file(manifest_path)?);
+            let manifest = Manifest::from_file(manifest_path)?;
+            self.set_active_manifest(manifest_path.clone(), Some(manifest))?;
             Ok(true)
         } else {
             Ok(false)
+        }
+    }
+
+    fn print_manifest_info(&self) {
+        if let Some(manifest) = &self.manifest {
+            println!("{}", "Manifest Info:".bold().blue());
+            println!("  App ID: {}", manifest.id.yellow());
+            println!("  SDK: {}", manifest.sdk.cyan());
+            println!("  Runtime: {}", manifest.runtime.cyan());
+            println!("  Runtime Version: {}", manifest.runtime_version.cyan());
         }
     }
 
@@ -71,6 +72,12 @@ impl<'a> FlatpakManager<'a> {
         if manager.manifest.is_none() && !manager.auto_select_manifest()? {
             return Err(anyhow::anyhow!("No manifest found."));
         }
+
+        // Print manifest info when we have one
+        if manager.manifest.is_some() {
+            manager.print_manifest_info();
+        }
+
         manager.init()?;
         Ok(manager)
     }
@@ -335,13 +342,16 @@ impl<'a> FlatpakManager<'a> {
         self.state.save()
     }
 
-    pub fn build_and_run(&mut self) -> Result<()> {
-        self.build()?;
-        self.run()
+    pub fn rebuild(&mut self) -> Result<()> {
+        println!("{}", "Rebuilding application...".bold());
+        self.clean()?;
+        self.build()
     }
 
-    pub fn stop(&mut self) -> Result<()> {
-        kill_process_group(self.state)
+    pub fn build_and_run(&mut self) -> Result<()> {
+        println!("{}", "Building and running application...".bold());
+        self.build()?;
+        self.run()
     }
 
     pub fn run(&self) -> Result<()> {
@@ -572,6 +582,10 @@ impl<'a> FlatpakManager<'a> {
         if let Some(manifest) = manifest {
             self.manifest = Some(manifest);
         }
+
+        // Print manifest info
+        self.print_manifest_info();
+
         println!(
             "{} {:?}. You can now run `{}`.",
             "Selected manifest:".green(),
