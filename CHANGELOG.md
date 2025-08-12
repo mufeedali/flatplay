@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1](https://github.com/mufeedali/flatplay/compare/v0.3.0...v0.3.1) - 2025-08-12
+
+### Other
+
+- *(deps)* bump clap_complete from 4.5.55 to 4.5.57
+- *(deps)* bump clap from 4.5.42 to 4.5.44
+- *(deps)* bump serde_json from 1.0.141 to 1.0.142
+- *(deps)* bump clap from 4.5.41 to 4.5.42
+
 ## [0.3.0](https://github.com/mufeedali/flatplay/compare/v0.2.3...v0.3.0) - 2025-08-03
 
 ### Removed
