@@ -1,6 +1,6 @@
 # Flatplay
 
-Flatplay is a simple CLI tool to build and run Flatpak applications. It's designed to be easy to integrate into your workflows with editors like Zed or neovim.
+Flatplay is a CLI tool to build and run Flatpak applications. It's designed to be easy to integrate into your workflows with editors like Zed or neovim.
 
 Note that this is a **work in progress** and you might encounter issues along the way.
 

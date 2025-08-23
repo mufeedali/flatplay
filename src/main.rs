@@ -99,7 +99,10 @@ fn main() {
     let mut state = State::load(base_dir).unwrap();
 
     // Handle the "stop" command early.
-    if let Some(Commands::Stop) = cli.command {
+    if cli.command.is_none() {
+        // Simply running `flatplay` will stop existing processes as well.
+        handle_command!(kill_process_group(&mut state));
+    } else if let Some(Commands::Stop) = cli.command {
         handle_command!(kill_process_group(&mut state));
         return;
     }
