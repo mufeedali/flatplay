@@ -125,6 +125,9 @@ impl<'a> FlatpakManager<'a> {
         let repo_dir = self.build_dirs.repo_dir();
         let repo_dir_str = repo_dir.to_str().unwrap();
 
+        // Download sources for the application module first
+        self.download_application_sources()?;
+
         if let Some(module) = manifest.modules.last() {
             match module {
                 Module::Object {
@@ -161,14 +164,94 @@ impl<'a> FlatpakManager<'a> {
         Ok(())
     }
 
+    fn download_application_sources(&self) -> Result<()> {
+        let manifest = self.manifest.as_ref().unwrap();
+
+        if let Some(module) = manifest.modules.last()
+            && let Module::Object { name, sources, .. } = module
+        {
+            let source_dir = self.build_dirs.build_dir().join(name);
+
+            // Remove existing source directory if it exists
+            if source_dir.exists() {
+                std::fs::remove_dir_all(&source_dir)?;
+            }
+
+            // Download sources based on their type
+            for source in sources {
+                if let Some(source_type) = source.get("type").and_then(|v| v.as_str()) {
+                    match source_type {
+                        "git" => {
+                            if let (Some(url), Some(tag)) = (
+                                source.get("url").and_then(|v| v.as_str()),
+                                source.get("tag").and_then(|v| v.as_str()),
+                            ) {
+                                println!("Cloning {} from {}", name, url);
+                                run_command(
+                                    "git",
+                                    &[
+                                        "clone",
+                                        "--branch",
+                                        tag,
+                                        "--depth",
+                                        "1",
+                                        url,
+                                        source_dir.to_str().unwrap(),
+                                    ],
+                                    Some(self.state.base_dir.as_path()),
+                                )?;
+                            }
+                        }
+                        "dir" => {
+                            // For dir sources, no download needed - source is already local
+                            println!("Using local directory source for {}", name);
+                        }
+                        _ => {
+                            // For other source types, we'll need to extend this
+                            println!(
+                                "Warning: Source type '{}' not yet supported for direct download",
+                                source_type
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn run_meson(&self, repo_dir_str: &str, config_opts: Option<&Vec<String>>) -> Result<()> {
+        let manifest = self.manifest.as_ref().unwrap();
+        let source_dir = if let Some(Module::Object { name, sources, .. }) = manifest.modules.last()
+        {
+            // Check if this is a dir source type
+            if let Some(source) = sources.first() {
+                if let (Some("dir"), Some(path)) = (
+                    source.get("type").and_then(|v| v.as_str()),
+                    source.get("path").and_then(|v| v.as_str()),
+                ) {
+                    // Use the actual source directory for dir sources, relative to manifest location
+                    let manifest_path = self.state.active_manifest.as_ref().unwrap();
+                    let manifest_dir = manifest_path.parent().unwrap();
+                    manifest_dir.join(path)
+                } else {
+                    // Use downloaded source directory for other types
+                    self.build_dirs.build_dir().join(name)
+                }
+            } else {
+                self.build_dirs.build_dir().join(name)
+            }
+        } else {
+            return Err(anyhow::anyhow!("No application module found"));
+        };
+        let source_dir_str = source_dir.to_str().unwrap();
         let build_dir = self.build_dirs.build_system_dir();
         let build_dir_str = build_dir.to_str().unwrap();
         let mut meson_args = vec!["build", repo_dir_str, "meson", "setup"];
         if let Some(opts) = config_opts {
             meson_args.extend(opts.iter().map(|s| s.as_str()));
         }
-        meson_args.extend(&["--prefix=/app", build_dir_str]);
+        meson_args.extend(&["--prefix=/app", source_dir_str, build_dir_str]);
         run_command("flatpak", &meson_args, Some(self.state.base_dir.as_path()))?;
         run_command(
             "flatpak",

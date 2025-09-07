@@ -100,10 +100,10 @@ pub fn find_manifests_in_path(path: &Path, exclude_prefix: Option<&Path>) -> Res
             if e.file_name().to_str().is_some_and(|s| s.starts_with('.')) {
                 return false;
             }
-            if let Some(prefix) = &exclude_prefix {
-                if e.path().starts_with(prefix) {
-                    return false;
-                }
+            if let Some(prefix) = &exclude_prefix
+                && e.path().starts_with(prefix)
+            {
+                return false;
             }
             true
         })

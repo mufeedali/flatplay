@@ -74,10 +74,10 @@ fn get_base_dir() -> PathBuf {
         .arg("--show-toplevel")
         .output();
 
-    if let Ok(output) = output {
-        if output.status.success() {
-            return PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
-        }
+    if let Ok(output) = output
+        && output.status.success()
+    {
+        return PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
     }
     PathBuf::from(".")
 }
@@ -108,16 +108,16 @@ fn main() {
     }
 
     // Check if another instance is already running.
-    if let Some(pgid) = state.process_group_id {
-        if is_process_running(pgid) {
-            eprintln!(
-                "{}: Another instance of flatplay is already running (PID: {}).",
-                "Error".red(),
-                pgid
-            );
-            eprintln!("Run '{}' to terminate it.", "flatplay stop".bold().italic());
-            return;
-        }
+    if let Some(pgid) = state.process_group_id
+        && is_process_running(pgid)
+    {
+        eprintln!(
+            "{}: Another instance of flatplay is already running (PID: {}).",
+            "Error".red(),
+            pgid
+        );
+        eprintln!("Run '{}' to terminate it.", "flatplay stop".bold().italic());
+        return;
     }
 
     // Become a process group leader.
