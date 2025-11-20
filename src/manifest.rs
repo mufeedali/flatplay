@@ -70,7 +70,7 @@ impl Manifest {
         let content = fs::read_to_string(path)?;
         let manifest: Manifest = match path.extension().and_then(|s| s.to_str()) {
             Some("json") => serde_json::from_str(&content)?,
-            Some("yaml") | Some("yml") => serde_yaml::from_str(&content)?,
+            Some("yaml") | Some("yml") => serde_saphyr::from_str(&content)?,
             _ => return Err(anyhow::anyhow!("Unsupported manifest format")),
         };
         if !is_valid_dbus_name(&manifest.id) {
