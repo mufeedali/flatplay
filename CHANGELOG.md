@@ -15,9 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
-- *(deps)* update deps
-- *(deps)* bump multiple
-- *(deps)* update multiple deps
+- *(deps)* Update deps
 
 ## [0.4.1](https://github.com/mufeedali/flatplay/compare/v0.4.0...v0.4.1) - 2025-09-07
 
