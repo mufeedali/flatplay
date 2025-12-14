@@ -11,6 +11,7 @@ const STATE_FILE_NAME: &str = "state.json";
 #[serde(default)]
 pub struct State {
     pub active_manifest: Option<PathBuf>,
+    pub manifest_hash: Option<String>,
     pub dependencies_updated: bool,
     pub dependencies_built: bool,
     pub application_built: bool,
@@ -23,6 +24,7 @@ impl Default for State {
     fn default() -> Self {
         Self {
             active_manifest: None,
+            manifest_hash: None,
             dependencies_updated: false,
             dependencies_built: false,
             application_built: false,

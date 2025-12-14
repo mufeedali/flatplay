@@ -12,6 +12,8 @@ use crate::manifest::{Manifest, Module, find_manifests_in_path};
 use crate::state::State;
 use crate::utils::{get_a11y_bus_args, get_host_env};
 
+use sha2::{Digest, Sha256};
+
 pub struct FlatpakManager<'a> {
     state: &'a mut State,
     manifest: Option<Manifest>,
@@ -76,6 +78,7 @@ impl<'a> FlatpakManager<'a> {
         // Print manifest info when we have one
         if manager.manifest.is_some() {
             manager.print_manifest_info();
+            manager.check_manifest_changed()?;
         }
 
         manager.init()?;
@@ -405,6 +408,37 @@ impl<'a> FlatpakManager<'a> {
         self.state.save()
     }
 
+    fn check_manifest_changed(&mut self) -> Result<()> {
+        if let Some(manifest_path) = &self.state.active_manifest {
+            let manifest_content = fs::read(manifest_path)?;
+            let mut hasher = Sha256::new();
+            hasher.update(&manifest_content);
+            let hash = hasher
+                .finalize()
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<String>();
+
+            if let Some(stored_hash) = &self.state.manifest_hash {
+                if *stored_hash != hash {
+                    println!("{}", "Manifest changed, resetting build state...".yellow());
+                    self.state.reset();
+                    self.state.manifest_hash = Some(hash);
+                    self.state.save()?;
+                }
+            } else {
+                println!(
+                    "{}",
+                    "Manifest hash missing, resetting build state...".yellow()
+                );
+                self.state.reset();
+                self.state.manifest_hash = Some(hash);
+                self.state.save()?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn build(&mut self) -> Result<()> {
         if self.manifest.is_none() {
             println!(
@@ -660,6 +694,19 @@ impl<'a> FlatpakManager<'a> {
 
             // Change active manifest in state.
             self.state.active_manifest = Some(manifest_path.clone());
+
+            // Update hash for the new manifest
+            let manifest_content = fs::read(&manifest_path)?;
+            let mut hasher = Sha256::new();
+            hasher.update(&manifest_content);
+            self.state.manifest_hash = Some(
+                hasher
+                    .finalize()
+                    .iter()
+                    .map(|b| format!("{:02x}", b))
+                    .collect::<String>(),
+            );
+
             self.state.save()?;
         }
         if let Some(manifest) = manifest {
