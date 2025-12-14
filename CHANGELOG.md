@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- [**breaking**] Add manifest hash checking
+- [**breaking**] Add manifest hash checking (Triggers a rebuild in existing projects)
 
 ### Other
 
