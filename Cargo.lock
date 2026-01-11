@@ -521,12 +521,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ryu"
-version = "1.0.22"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a50f4cf475b65d88e057964e0e9bb1f0aa9bbb2036dc65c64596b42932536984"
-
-[[package]]
 name = "same-file"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -557,9 +551,9 @@ dependencies = [
 
 [[package]]
 name = "serde-saphyr"
-version = "0.0.12"
+version = "0.0.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef7e021087b4b525edcbb93045ca3f1dafeff7800b3c7960a90a75f197e257da"
+checksum = "45400dbf0a2c4c2af106c08eb1028b3e45bea3cd45517d3a0e8170b86597122f"
 dependencies = [
  "ahash",
  "annotate-snippets",
@@ -567,11 +561,11 @@ dependencies = [
  "encoding_rs_io",
  "nohash-hasher",
  "num-traits",
- "ryu",
  "saphyr-parser",
  "serde",
  "serde_json",
  "smallvec",
+ "zmij",
 ]
 
 [[package]]
