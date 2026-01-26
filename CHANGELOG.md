@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1](https://github.com/mufeedali/flatplay/compare/v0.5.0...v0.5.1) - 2026-01-26
+
+### Other
+
+- *(deps)* update deps
+- *(deps)* update deps
+- *(deps)* update deps
+- *(deps)* update deps
+- *(deps)* update deps
+
 ## [0.5.0](https://github.com/mufeedali/flatplay/compare/v0.4.2...v0.5.0) - 2025-12-14
 
 ### Added
