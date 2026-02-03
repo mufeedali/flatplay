@@ -38,3 +38,30 @@ impl BuildDirs {
         self.repo_dir().join("var")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_dirs_paths() {
+        let base = PathBuf::from("/tmp/test-project");
+        let dirs = BuildDirs::new(base.clone());
+
+        assert_eq!(dirs.build_dir(), base.join(".flatplay"));
+        assert_eq!(dirs.repo_dir(), base.join(".flatplay/repo"));
+        assert_eq!(dirs.build_system_dir(), base.join(".flatplay/_build"));
+        assert_eq!(
+            dirs.flatpak_builder_dir(),
+            base.join(".flatplay/flatpak-builder")
+        );
+        assert_eq!(
+            dirs.finalized_repo_dir(),
+            base.join(".flatplay/finalized-repo")
+        );
+        assert_eq!(dirs.ostree_dir(), base.join(".flatplay/ostree"));
+        assert_eq!(dirs.metadata_file(), base.join(".flatplay/repo/metadata"));
+        assert_eq!(dirs.files_dir(), base.join(".flatplay/repo/files"));
+        assert_eq!(dirs.var_dir(), base.join(".flatplay/repo/var"));
+    }
+}

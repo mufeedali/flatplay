@@ -3,6 +3,7 @@ use colored::*;
 use nix::errno::Errno;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
+use std::path::PathBuf;
 
 use crate::state::State;
 
@@ -38,4 +39,27 @@ pub fn kill_process_group(state: &mut State) -> Result<()> {
     state.process_group_id = None;
     state.save()?;
     Ok(())
+}
+
+pub struct PgidGuard {
+    base_dir: PathBuf,
+}
+
+impl PgidGuard {
+    pub fn new(base_dir: PathBuf) -> Self {
+        Self { base_dir }
+    }
+}
+
+impl Drop for PgidGuard {
+    fn drop(&mut self) {
+        if let Ok(mut state) = State::load(self.base_dir.clone())
+            && state.process_group_id.is_some()
+        {
+            state.process_group_id = None;
+            if let Err(e) = state.save() {
+                eprintln!("Warning: Failed to clean up state file: {}", e);
+            }
+        }
+    }
 }

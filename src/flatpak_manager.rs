@@ -1,7 +1,8 @@
+use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use colored::*;
 use dialoguer::{Select, theme::ColorfulTheme};
 use nix::unistd::geteuid;
@@ -14,6 +15,11 @@ use crate::utils::{get_a11y_bus_args, get_host_env};
 
 use sha2::{Digest, Sha256};
 
+fn path_to_str(path: &Path) -> Result<&str> {
+    path.to_str()
+        .context("Path contains invalid UTF-8 characters")
+}
+
 pub struct FlatpakManager<'a> {
     state: &'a mut State,
     manifest: Option<Manifest>,
@@ -22,7 +28,7 @@ pub struct FlatpakManager<'a> {
 
 impl<'a> FlatpakManager<'a> {
     fn find_manifests(&self) -> Result<Vec<PathBuf>> {
-        let current_dir = std::env::current_dir()?;
+        let current_dir = env::current_dir()?;
         let current_dir_canon = current_dir.canonicalize()?;
         let base_dir_canon = self.state.base_dir.canonicalize()?;
 
@@ -96,7 +102,7 @@ impl<'a> FlatpakManager<'a> {
     }
 
     fn init_build(&self) -> Result<()> {
-        let manifest = self.manifest.as_ref().unwrap();
+        let manifest = self.manifest.as_ref().context("No manifest available")?;
         let repo_dir = self.build_dirs.repo_dir();
 
         println!("{}", "Initializing build environment...".bold());
@@ -104,7 +110,7 @@ impl<'a> FlatpakManager<'a> {
             "flatpak",
             &[
                 "build-init",
-                repo_dir.to_str().unwrap(),
+                path_to_str(&repo_dir)?,
                 &manifest.id,
                 &manifest.sdk,
                 &manifest.runtime,
@@ -124,9 +130,9 @@ impl<'a> FlatpakManager<'a> {
     }
 
     fn build_application(&self) -> Result<()> {
-        let manifest = self.manifest.as_ref().unwrap();
+        let manifest = self.manifest.as_ref().context("No manifest available")?;
         let repo_dir = self.build_dirs.repo_dir();
-        let repo_dir_str = repo_dir.to_str().unwrap();
+        let repo_dir_str = path_to_str(&repo_dir)?;
 
         // Download sources for the application module first
         self.download_application_sources()?;
@@ -168,7 +174,7 @@ impl<'a> FlatpakManager<'a> {
     }
 
     fn download_application_sources(&self) -> Result<()> {
-        let manifest = self.manifest.as_ref().unwrap();
+        let manifest = self.manifest.as_ref().context("No manifest available")?;
 
         if let Some(module) = manifest.modules.last()
             && let Module::Object { name, sources, .. } = module
@@ -177,7 +183,7 @@ impl<'a> FlatpakManager<'a> {
 
             // Remove existing source directory if it exists
             if source_dir.exists() {
-                std::fs::remove_dir_all(&source_dir)?;
+                fs::remove_dir_all(&source_dir)?;
             }
 
             // Download sources based on their type
@@ -199,7 +205,7 @@ impl<'a> FlatpakManager<'a> {
                                         "--depth",
                                         "1",
                                         url,
-                                        source_dir.to_str().unwrap(),
+                                        path_to_str(&source_dir)?,
                                     ],
                                     Some(self.state.base_dir.as_path()),
                                 )?;
@@ -224,18 +230,22 @@ impl<'a> FlatpakManager<'a> {
     }
 
     fn run_meson(&self, repo_dir_str: &str, config_opts: Option<&Vec<String>>) -> Result<()> {
-        let manifest = self.manifest.as_ref().unwrap();
+        let manifest = self.manifest.as_ref().context("No manifest available")?;
         let source_dir = if let Some(Module::Object { name, sources, .. }) = manifest.modules.last()
         {
-            // Check if this is a dir source type
             if let Some(source) = sources.first() {
                 if let (Some("dir"), Some(path)) = (
                     source.get("type").and_then(|v| v.as_str()),
                     source.get("path").and_then(|v| v.as_str()),
                 ) {
-                    // Use the actual source directory for dir sources, relative to manifest location
-                    let manifest_path = self.state.active_manifest.as_ref().unwrap();
-                    let manifest_dir = manifest_path.parent().unwrap();
+                    let manifest_path = self
+                        .state
+                        .active_manifest
+                        .as_ref()
+                        .context("No active manifest")?;
+                    let manifest_dir = manifest_path
+                        .parent()
+                        .context("Manifest path has no parent directory")?;
                     manifest_dir.join(path)
                 } else {
                     // Use downloaded source directory for other types
@@ -247,9 +257,9 @@ impl<'a> FlatpakManager<'a> {
         } else {
             return Err(anyhow::anyhow!("No application module found"));
         };
-        let source_dir_str = source_dir.to_str().unwrap();
+        let source_dir_str = path_to_str(&source_dir)?;
         let build_dir = self.build_dirs.build_system_dir();
-        let build_dir_str = build_dir.to_str().unwrap();
+        let build_dir_str = path_to_str(&build_dir)?;
         let mut meson_args = vec!["build", repo_dir_str, "meson", "setup"];
         if let Some(opts) = config_opts {
             meson_args.extend(opts.iter().map(|s| s.as_str()));
@@ -277,7 +287,7 @@ impl<'a> FlatpakManager<'a> {
 
     fn run_cmake(&self, repo_dir_str: &str, config_opts: Option<&Vec<String>>) -> Result<()> {
         let build_dir = self.build_dirs.build_system_dir();
-        let build_dir_str = build_dir.to_str().unwrap();
+        let build_dir_str = path_to_str(&build_dir)?;
         let b_flag = format!("-B{build_dir_str}");
         let mut cmake_args = vec![
             "build",
@@ -349,10 +359,15 @@ impl<'a> FlatpakManager<'a> {
 
     fn build_dependencies(&mut self) -> Result<()> {
         println!("{}", "Building dependencies...".bold());
-        let manifest = self.manifest.as_ref().unwrap();
-        let manifest_path = self.state.active_manifest.as_ref().unwrap();
+        let manifest = self.manifest.as_ref().context("No manifest available")?;
+        let manifest_path = self
+            .state
+            .active_manifest
+            .as_ref()
+            .context("No active manifest")?;
         let repo_dir = self.build_dirs.repo_dir();
         let state_dir = self.build_dirs.flatpak_builder_dir();
+        let last_module = manifest.modules.last().context("Manifest has no modules")?;
         flatpak_builder(
             &[
                 "--ccache",
@@ -361,16 +376,16 @@ impl<'a> FlatpakManager<'a> {
                 "--disable-download",
                 "--build-only",
                 "--keep-build-dirs",
-                &format!("--state-dir={}", state_dir.to_str().unwrap()),
+                &format!("--state-dir={}", path_to_str(&state_dir)?),
                 &format!(
                     "--stop-at={}",
-                    match manifest.modules.last().unwrap() {
+                    match last_module {
                         Module::Object { name, .. } => name,
                         Module::Reference(s) => s,
                     }
                 ),
-                repo_dir.to_str().unwrap(),
-                manifest_path.to_str().unwrap(),
+                path_to_str(&repo_dir)?,
+                path_to_str(manifest_path)?,
             ],
             Some(self.state.base_dir.as_path()),
         )?;
@@ -381,26 +396,31 @@ impl<'a> FlatpakManager<'a> {
     pub fn update_dependencies(&mut self) -> Result<()> {
         println!("{}", "Updating dependencies...".bold());
 
-        let manifest = self.manifest.as_ref().unwrap();
-        let manifest_path = self.state.active_manifest.as_ref().unwrap();
+        let manifest = self.manifest.as_ref().context("No manifest available")?;
+        let manifest_path = self
+            .state
+            .active_manifest
+            .as_ref()
+            .context("No active manifest")?;
         let repo_dir = self.build_dirs.repo_dir();
         let state_dir = self.build_dirs.flatpak_builder_dir();
+        let last_module = manifest.modules.last().context("Manifest has no modules")?;
         flatpak_builder(
             &[
                 "--ccache",
                 "--force-clean",
                 "--disable-updates",
                 "--download-only",
-                &format!("--state-dir={}", state_dir.to_str().unwrap()),
+                &format!("--state-dir={}", path_to_str(&state_dir)?),
                 &format!(
                     "--stop-at={}",
-                    match manifest.modules.last().unwrap() {
+                    match last_module {
                         Module::Object { name, .. } => name,
                         Module::Reference(s) => s,
                     }
                 ),
-                repo_dir.to_str().unwrap(),
-                manifest_path.to_str().unwrap(),
+                path_to_str(&repo_dir)?,
+                path_to_str(manifest_path)?,
             ],
             Some(self.state.base_dir.as_path()),
         )?;
@@ -479,25 +499,23 @@ impl<'a> FlatpakManager<'a> {
             );
             return Ok(());
         }
-        let manifest = self.manifest.as_ref().unwrap();
+        let manifest = self.manifest.as_ref().context("No manifest available")?;
         let repo_dir = self.build_dirs.repo_dir();
 
-        let mut args: Vec<String> = [
-            "build",
-            "--with-appdir",
-            "--allow=devel",
-            format!(
-                "--bind-mount=/run/user/{user_id}/doc=/run/user/{user_id}/doc/by-app/{app_id}",
-                user_id = geteuid(),
-                app_id = manifest.id
-            )
-            .as_str(),
-            "--talk-name=org.freedesktop.portal.*",
-            "--talk-name=org.a11y.Bus",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+        let bind_mount_arg = format!(
+            "--bind-mount=/run/user/{user_id}/doc=/run/user/{user_id}/doc/by-app/{app_id}",
+            user_id = geteuid(),
+            app_id = manifest.id
+        );
+
+        let mut args: Vec<String> = vec![
+            "build".to_string(),
+            "--with-appdir".to_string(),
+            "--allow=devel".to_string(),
+            bind_mount_arg,
+            "--talk-name=org.freedesktop.portal.*".to_string(),
+            "--talk-name=org.a11y.Bus".to_string(),
+        ];
 
         args.extend(
             get_host_env()
@@ -508,7 +526,7 @@ impl<'a> FlatpakManager<'a> {
         args.extend(get_a11y_bus_args());
 
         args.extend(manifest.finish_args.clone());
-        args.push(repo_dir.to_str().unwrap().to_string());
+        args.push(path_to_str(&repo_dir)?.to_string());
         args.push(manifest.command.clone());
         if let Some(x_run_args) = &manifest.x_run_args {
             args.extend(x_run_args.clone());
@@ -527,7 +545,7 @@ impl<'a> FlatpakManager<'a> {
             );
             return Ok(());
         }
-        let manifest = self.manifest.as_ref().unwrap();
+        let manifest = self.manifest.as_ref().context("No manifest available")?;
         let repo_dir = self.build_dirs.repo_dir();
         let finalized_repo_dir = self.build_dirs.finalized_repo_dir();
         let ostree_dir = self.build_dirs.ostree_dir();
@@ -537,13 +555,12 @@ impl<'a> FlatpakManager<'a> {
             fs::remove_dir_all(&finalized_repo_dir)?;
         }
 
-        // Copy repo
         run_command(
             "cp",
             &[
                 "-r",
-                repo_dir.to_str().unwrap(),
-                finalized_repo_dir.to_str().unwrap(),
+                path_to_str(&repo_dir)?,
+                path_to_str(&finalized_repo_dir)?,
             ],
             Some(self.state.base_dir.as_path()),
         )?;
@@ -553,7 +570,7 @@ impl<'a> FlatpakManager<'a> {
 
         args.extend(manifest.finish_args.clone());
         args.push(format!("--command={}", manifest.command));
-        args.push(finalized_repo_dir.to_str().unwrap().to_string());
+        args.push(path_to_str(&finalized_repo_dir)?.to_string());
 
         let args_str: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
 
@@ -564,20 +581,21 @@ impl<'a> FlatpakManager<'a> {
             "flatpak",
             &[
                 "build-export",
-                ostree_dir.to_str().unwrap(),
-                finalized_repo_dir.to_str().unwrap(),
+                path_to_str(&ostree_dir)?,
+                path_to_str(&finalized_repo_dir)?,
             ],
             Some(self.state.base_dir.as_path()),
         )?;
 
         // Bundle build
+        let bundle_name = format!("{}.flatpak", manifest.id);
         run_command(
             "flatpak",
             &[
                 "build-bundle",
-                ostree_dir.to_str().unwrap(),
-                format!("{}.flatpak", manifest.id.clone()).as_str(),
-                manifest.id.clone().as_str(),
+                path_to_str(&ostree_dir)?,
+                &bundle_name,
+                manifest.id.as_str(),
             ],
             Some(self.state.base_dir.as_path()),
         )
@@ -601,7 +619,7 @@ impl<'a> FlatpakManager<'a> {
             );
             return Ok(());
         }
-        let manifest = self.manifest.as_ref().unwrap();
+        let manifest = self.manifest.as_ref().context("No manifest available")?;
         let sdk_id = format!("{}//{}", manifest.sdk, manifest.runtime_version);
         run_command(
             "flatpak",
@@ -618,12 +636,10 @@ impl<'a> FlatpakManager<'a> {
             );
             return Ok(());
         }
-        let manifest = self.manifest.as_ref().unwrap();
-        let _app_id = &manifest.id;
         let repo_dir = self.build_dirs.repo_dir();
         run_command(
             "flatpak",
-            &["build", repo_dir.to_str().unwrap(), "bash"],
+            &["build", path_to_str(&repo_dir)?, "bash"],
             Some(self.state.base_dir.as_path()),
         )
     }
@@ -656,13 +672,13 @@ impl<'a> FlatpakManager<'a> {
 
         let manifest_strings: Vec<String> = manifests
             .iter()
-            .map(|p| {
-                let path_str = p.to_str().unwrap().to_string();
-                if self.state.active_manifest.as_ref() == Some(p) {
+            .filter_map(|p| {
+                let path_str = p.to_str()?.to_string();
+                Some(if self.state.active_manifest.as_ref() == Some(p) {
                     format!("{} {}", "*".green().bold(), path_str)
                 } else {
                     format!("  {path_str}")
-                }
+                })
             })
             .collect();
 

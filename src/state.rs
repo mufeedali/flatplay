@@ -69,3 +69,58 @@ impl State {
         self.application_built = false;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_state_serialization() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let base_dir = temp_dir.path().to_path_buf();
+
+        let mut state = State::load(base_dir.clone()).unwrap();
+        assert_eq!(state.active_manifest, None);
+        assert_eq!(state.manifest_hash, None);
+        assert!(!state.dependencies_updated);
+        assert!(!state.dependencies_built);
+        assert!(!state.application_built);
+        assert_eq!(state.process_group_id, None);
+
+        state.active_manifest = Some(PathBuf::from("/tmp/manifest.json"));
+        state.manifest_hash = Some("abc123".to_string());
+        state.dependencies_updated = true;
+        state.process_group_id = Some(12345);
+
+        state.save().unwrap();
+
+        let loaded_state = State::load(base_dir).unwrap();
+        assert_eq!(
+            loaded_state.active_manifest,
+            Some(PathBuf::from("/tmp/manifest.json"))
+        );
+        assert_eq!(loaded_state.manifest_hash, Some("abc123".to_string()));
+        assert!(loaded_state.dependencies_updated);
+        assert!(!loaded_state.dependencies_built);
+        assert_eq!(loaded_state.process_group_id, Some(12345));
+    }
+
+    #[test]
+    fn test_state_reset() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut state = State::load(temp_dir.path().to_path_buf()).unwrap();
+
+        state.dependencies_updated = true;
+        state.dependencies_built = true;
+        state.application_built = true;
+        state.process_group_id = Some(999);
+
+        state.reset();
+
+        assert!(!state.dependencies_updated);
+        assert!(!state.dependencies_built);
+        assert!(!state.application_built);
+        assert_eq!(state.process_group_id, Some(999));
+    }
+}

@@ -1,10 +1,8 @@
-use std::panic;
-use std::path::PathBuf;
-use std::process::Command;
-
 use clap::{CommandFactory, Parser, Subcommand};
 use colored::*;
 use nix::unistd::{getpid, setpgid};
+use std::path::PathBuf;
+use std::process::{Command, Stdio, exit};
 
 mod build_dirs;
 mod command;
@@ -15,7 +13,7 @@ mod state;
 mod utils;
 
 use flatpak_manager::FlatpakManager;
-use process::{is_process_running, kill_process_group};
+use process::{PgidGuard, is_process_running, kill_process_group};
 use state::State;
 
 #[derive(Parser)]
@@ -82,10 +80,51 @@ fn get_base_dir() -> PathBuf {
     PathBuf::from(".")
 }
 
+fn check_dependencies() -> anyhow::Result<()> {
+    let required = [("git", "git"), ("flatpak", "flatpak")];
+    let mut missing = Vec::new();
+
+    for (cmd, name) in &required {
+        if Command::new(cmd)
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_err()
+        {
+            missing.push(*name);
+        }
+    }
+
+    if Command::new("flatpak-builder")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_err()
+        && Command::new("flatpak")
+            .args(["run", "org.flatpak.Builder", "--version"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_err()
+    {
+        missing.push("flatpak-builder or org.flatpak.Builder");
+    }
+
+    if !missing.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Missing required dependencies: {}",
+            missing.join(", ")
+        ));
+    }
+
+    Ok(())
+}
+
 fn main() {
     let cli = Cli::parse();
 
-    // Handle shell completions first.
     if let Some(Commands::Completions { shell }) = cli.command {
         use clap_complete::generate;
         use std::io;
@@ -94,20 +133,21 @@ fn main() {
         return;
     }
 
-    let base_dir = get_base_dir();
-    let base_dir_for_panic_hook = base_dir.clone();
-    let mut state = State::load(base_dir).unwrap();
+    if let Err(err) = check_dependencies() {
+        eprintln!("{}: {}", "Error".red(), err);
+        exit(1);
+    }
 
-    // Handle the "stop" command early.
+    let base_dir = get_base_dir();
+    let mut state = State::load(base_dir.clone()).unwrap();
+
     if cli.command.is_none() {
-        // Simply running `flatplay` will stop existing processes as well.
         handle_command!(kill_process_group(&mut state));
     } else if let Some(Commands::Stop) = cli.command {
         handle_command!(kill_process_group(&mut state));
         return;
     }
 
-    // Check if another instance is already running.
     if let Some(pgid) = state.process_group_id
         && is_process_running(pgid)
     {
@@ -120,44 +160,30 @@ fn main() {
         return;
     }
 
-    // Become a process group leader.
-    // This also makes the pid the process group ID.
     let pid = getpid();
     if let Err(e) = setpgid(pid, pid) {
         eprintln!("Failed to set process group ID: {e}");
         return;
     }
 
-    // Save the process group ID to the state.
     state.process_group_id = Some(pid.as_raw() as u32);
     if let Err(e) = state.save() {
         eprintln!("Failed to save state: {e}");
         return;
     }
 
-    // Handle unclean ends where possible.
-    let original_hook = panic::take_hook();
-    panic::set_hook(Box::new(move |panic_info| {
-        if let Ok(mut state) = State::load(base_dir_for_panic_hook.clone()) {
-            state.process_group_id = None;
-            if let Err(e) = state.save() {
-                eprintln!("Failed to save state in panic hook: {e}");
-            }
-        }
-        original_hook(panic_info);
-    }));
+    let _guard = PgidGuard::new(base_dir);
 
     let mut flatpak_manager = match FlatpakManager::new(&mut state) {
         Ok(manager) => manager,
         Err(e) => {
             eprintln!("{}: {}", "Error".red(), e);
-            std::process::exit(1);
+            exit(1);
         }
     };
 
     match &cli.command {
-        // Handled earlier.
-        Some(Commands::Completions { shell: _ }) => {}
+        Some(Commands::Completions { .. }) => unreachable!(),
         Some(Commands::Stop) => {}
 
         Some(Commands::Build) => handle_command!(flatpak_manager.build()),
@@ -176,8 +202,4 @@ fn main() {
         }
         None => handle_command!(flatpak_manager.build_and_run()),
     }
-
-    // Clean up pgid in the state file on normal exit.
-    state.process_group_id = None;
-    state.save().unwrap();
 }

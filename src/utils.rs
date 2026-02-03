@@ -7,7 +7,6 @@ pub fn get_host_env() -> HashMap<String, String> {
     let forwarded_env_keys = [
         "COLORTERM",
         "DESKTOP_SESSION",
-        "LANG",
         "WAYLAND_DISPLAY",
         "XDG_CURRENT_DESKTOP",
         "XDG_SEAT",
@@ -16,6 +15,19 @@ pub fn get_host_env() -> HashMap<String, String> {
         "XDG_SESSION_TYPE",
         "XDG_VTNR",
         "AT_SPI_BUS_ADDRESS",
+        "LANG",
+        "LANGUAGE",
+        "LC_ALL",
+        "LC_CTYPE",
+        "LC_MESSAGES",
+        "http_proxy",
+        "HTTP_PROXY",
+        "https_proxy",
+        "HTTPS_PROXY",
+        "ftp_proxy",
+        "FTP_PROXY",
+        "no_proxy",
+        "NO_PROXY",
     ];
 
     let mut env_vars = HashMap::new();

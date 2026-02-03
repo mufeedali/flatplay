@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use anyhow::Result;
@@ -5,12 +6,12 @@ use colored::*;
 
 // Returns true if running inside a Flatpak sandbox.
 fn is_sandboxed() -> bool {
-    std::path::Path::new("/.flatpak-info").exists()
+    Path::new("/.flatpak-info").exists()
 }
 
 // Returns true if running inside a container like Toolbx or distrobox.
 fn is_inside_container() -> bool {
-    std::path::Path::new("/run/.containerenv").exists()
+    Path::new("/run/.containerenv").exists()
 }
 
 // Returns true if the given command with arguments executes successfully.
@@ -24,11 +25,7 @@ fn command_succeeds(cmd: &str, args: &[&str]) -> bool {
 }
 
 // Runs a command, handling Flatpak sandbox and container specifics.
-pub fn run_command(
-    command: &str,
-    args: &[&str],
-    working_dir: Option<&std::path::Path>,
-) -> Result<()> {
+pub fn run_command(command: &str, args: &[&str], working_dir: Option<&Path>) -> Result<()> {
     let mut command_args = args.to_vec();
 
     // Workaround for rofiles-fuse issues in containers.
@@ -86,7 +83,7 @@ pub fn run_command(
 }
 
 // Runs flatpak-builder, preferring the native binary, then the Flatpak app.
-pub fn flatpak_builder(args: &[&str], working_dir: Option<&std::path::Path>) -> Result<()> {
+pub fn flatpak_builder(args: &[&str], working_dir: Option<&Path>) -> Result<()> {
     if command_succeeds("flatpak-builder", &["--version"]) {
         run_command("flatpak-builder", args, working_dir)
     } else if command_succeeds("flatpak", &["run", "org.flatpak.Builder", "--version"]) {

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-fn is_valid_dbus_name(name: &str) -> bool {
+pub fn is_valid_dbus_name(name: &str) -> bool {
     if name.is_empty() || name.len() > 255 {
         return false;
     }
@@ -121,12 +121,128 @@ pub fn find_manifests_in_path(path: &Path, exclude_prefix: Option<&Path>) -> Res
     }
 
     manifests.sort_by(|a, b| {
-        let a_is_devel = a.to_str().unwrap().contains(".Devel.");
-        let b_is_devel = b.to_str().unwrap().contains(".Devel.");
+        let a_is_devel = a.to_str().unwrap_or("").contains(".Devel.");
+        let b_is_devel = b.to_str().unwrap_or("").contains(".Devel.");
         b_is_devel
             .cmp(&a_is_devel)
             .then_with(|| a.components().count().cmp(&b.components().count()))
     });
 
     Ok(manifests)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_valid_dbus_name() {
+        assert!(is_valid_dbus_name("org.example.App"));
+        assert!(is_valid_dbus_name("com.github.user.Application"));
+        assert!(is_valid_dbus_name("io.github.user_name.app-name"));
+
+        assert!(!is_valid_dbus_name(""));
+        assert!(!is_valid_dbus_name("single"));
+        assert!(!is_valid_dbus_name("org.123invalid"));
+        assert!(!is_valid_dbus_name("org..double"));
+        assert!(!is_valid_dbus_name(".org.example"));
+        assert!(!is_valid_dbus_name("org.example."));
+
+        let long_name = format!("org.{}.App", "a".repeat(250));
+        assert!(!is_valid_dbus_name(&long_name));
+    }
+
+    #[test]
+    fn test_manifest_parsing_json() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let manifest_content = r#"{
+            "app-id": "org.example.TestApp",
+            "sdk": "org.gnome.Sdk",
+            "runtime": "org.gnome.Platform",
+            "runtime-version": "47",
+            "command": "test-app",
+            "modules": [
+                {
+                    "name": "test-module",
+                    "buildsystem": "meson",
+                    "sources": []
+                }
+            ],
+            "finish-args": [
+                "--share=network"
+            ]
+        }"#;
+
+        let mut temp_file = NamedTempFile::with_suffix(".json").unwrap();
+        temp_file.write_all(manifest_content.as_bytes()).unwrap();
+        temp_file.flush().unwrap();
+
+        let manifest = Manifest::from_file(temp_file.path()).unwrap();
+        assert_eq!(manifest.id, "org.example.TestApp");
+        assert_eq!(manifest.sdk, "org.gnome.Sdk");
+        assert_eq!(manifest.runtime, "org.gnome.Platform");
+        assert_eq!(manifest.runtime_version, "47");
+        assert_eq!(manifest.command, "test-app");
+        assert_eq!(manifest.finish_args.len(), 1);
+        assert_eq!(manifest.modules.len(), 1);
+    }
+
+    #[test]
+    fn test_manifest_parsing_yaml() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let manifest_content = r#"
+app-id: org.example.TestApp
+sdk: org.gnome.Sdk
+runtime: org.gnome.Platform
+runtime-version: "47"
+command: test-app
+modules:
+  - name: test-module
+    buildsystem: meson
+    sources: []
+finish-args:
+  - --share=network
+"#;
+
+        let mut temp_file = NamedTempFile::with_suffix(".yaml").unwrap();
+        temp_file.write_all(manifest_content.as_bytes()).unwrap();
+        temp_file.flush().unwrap();
+
+        let manifest = Manifest::from_file(temp_file.path()).unwrap();
+        assert_eq!(manifest.id, "org.example.TestApp");
+        assert_eq!(manifest.sdk, "org.gnome.Sdk");
+        assert_eq!(manifest.command, "test-app");
+    }
+
+    #[test]
+    fn test_manifest_invalid_app_id() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let manifest_content = r#"{
+            "app-id": "invalid",
+            "sdk": "org.gnome.Sdk",
+            "runtime": "org.gnome.Platform",
+            "runtime-version": "47",
+            "command": "test-app",
+            "modules": []
+        }"#;
+
+        let mut temp_file = NamedTempFile::with_suffix(".json").unwrap();
+        temp_file.write_all(manifest_content.as_bytes()).unwrap();
+        temp_file.flush().unwrap();
+
+        let result = Manifest::from_file(temp_file.path());
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid application ID")
+        );
+    }
 }
