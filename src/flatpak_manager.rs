@@ -88,6 +88,8 @@ impl<'a> FlatpakManager<'a> {
         }
 
         manager.init()?;
+        manager.state.save()?;
+
         Ok(manager)
     }
 

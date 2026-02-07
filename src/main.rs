@@ -165,14 +165,7 @@ fn main() {
         eprintln!("Failed to set process group ID: {e}");
         return;
     }
-
     state.process_group_id = Some(pid.as_raw() as u32);
-    if let Err(e) = state.save() {
-        eprintln!("Failed to save state: {e}");
-        return;
-    }
-
-    let _guard = PgidGuard::new(base_dir);
 
     let mut flatpak_manager = match FlatpakManager::new(&mut state) {
         Ok(manager) => manager,
@@ -181,6 +174,7 @@ fn main() {
             exit(1);
         }
     };
+    let _guard = PgidGuard::new(base_dir);
 
     match &cli.command {
         Some(Commands::Completions { .. }) => unreachable!(),
