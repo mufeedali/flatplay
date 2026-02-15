@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use colored::*;
-use dialoguer::{Select, theme::ColorfulTheme};
+use dialoguer::{Select, theme::SimpleTheme};
 use nix::unistd::geteuid;
 
 use crate::build_dirs::BuildDirs;
@@ -683,7 +683,7 @@ impl<'a> FlatpakManager<'a> {
             let manifest = Manifest::from_file(&manifest_path)?;
             self.set_active_manifest(manifest_path, Some(manifest))?;
             self.print_manifest_info();
-            self.print_selection_message();
+            self.print_selection_message(true);
             return Ok(());
         }
 
@@ -698,7 +698,8 @@ impl<'a> FlatpakManager<'a> {
         let manifest_strings: Vec<String> = manifests
             .iter()
             .filter_map(|p| {
-                let path_str = p.to_str()?.to_string();
+                let display_path = p.strip_prefix(&self.state.base_dir).unwrap_or(p.as_path());
+                let path_str = display_path.to_str()?.to_string();
                 Some(if self.state.active_manifest.as_ref() == Some(p) {
                     format!("* {}", path_str)
                 } else {
@@ -712,16 +713,17 @@ impl<'a> FlatpakManager<'a> {
             .position(|p| self.state.active_manifest.as_ref() == Some(p))
             .unwrap_or(0);
 
-        let theme = ColorfulTheme::default();
+        let theme = SimpleTheme;
+        let prompt = format!("{} {}", "│".blue(), "Select a manifest".blue());
         let selection = Select::with_theme(&theme)
-            .with_prompt("Select a manifest")
+            .with_prompt(&prompt)
             .items(&manifest_strings)
             .default(default_selection)
             .interact()?;
 
         self.set_active_manifest(manifests[selection].clone(), None)?;
         self.print_manifest_info();
-        self.print_selection_message();
+        self.print_selection_message(false);
         Ok(())
     }
 
@@ -750,16 +752,20 @@ impl<'a> FlatpakManager<'a> {
         Ok(())
     }
 
-    fn print_selection_message(&self) {
-        if let Some(manifest_path) = &self.state.active_manifest {
-            let display_path = manifest_path
-                .strip_prefix(&self.state.base_dir)
-                .unwrap_or(manifest_path.as_path());
+    fn print_selection_message(&self, show_path: bool) {
+        if show_path {
+            if let Some(manifest_path) = &self.state.active_manifest {
+                let display_path = manifest_path
+                    .strip_prefix(&self.state.base_dir)
+                    .unwrap_or(manifest_path.as_path());
 
-            status_success(format!(
-                "Selected manifest: {}. You can now run `flatplay`.",
-                display_path.display(),
-            ));
+                status_success(format!(
+                    "Selected manifest: {}. You can now run `flatplay`.",
+                    display_path.display(),
+                ));
+            }
+        } else {
+            status_success("Ready. Run `flatplay` to build.");
         }
     }
 }
