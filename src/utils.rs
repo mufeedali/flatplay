@@ -1,3 +1,4 @@
+use anyhow::{Context, Result};
 use regex::Regex;
 use std::collections::HashMap;
 use std::env;
@@ -32,16 +33,16 @@ pub fn get_host_env() -> HashMap<String, String> {
 
     let mut env_vars = HashMap::new();
 
-    for (key, value) in env::vars() {
-        if forwarded_env_keys.contains(&key.as_str()) {
-            env_vars.insert(key, value);
+    for key in forwarded_env_keys {
+        if let Ok(value) = env::var(key) {
+            env_vars.insert(key.to_string(), value);
         }
     }
 
     env_vars
 }
 
-pub fn get_a11y_bus_args() -> Vec<String> {
+pub fn get_a11y_bus_args() -> Result<Vec<String>> {
     let output = Command::new("gdbus")
         .args([
             "call",
@@ -50,33 +51,33 @@ pub fn get_a11y_bus_args() -> Vec<String> {
             "--object-path=/org/a11y/bus",
             "--method=org.a11y.Bus.GetAddress",
         ])
-        .output();
+        .output()
+        .context("Failed to execute gdbus")?;
 
-    let output = match output {
-        Ok(output) if output.status.success() => output,
-        _ => return Vec::new(),
-    };
+    if !output.status.success() {
+        anyhow::bail!("gdbus a11y bus query failed with status: {}", output.status);
+    }
 
     let address = String::from_utf8_lossy(&output.stdout)
         .trim()
         .replace("('", "")
         .replace("',)", "");
 
-    let re = Regex::new(r"unix:path=([^,]+)(,.*)?").unwrap();
-    let caps = match re.captures(&address) {
-        Some(caps) => caps,
-        None => return Vec::new(),
-    };
+    static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"unix:path=([^,]+)(,.*)?").expect("hardcoded regex"));
+    let caps = re
+        .captures(&address)
+        .context("Failed to parse a11y bus address")?;
 
     let unix_path = caps.get(1).map_or("", |m| m.as_str());
     let suffix = caps.get(2).map_or("", |m| m.as_str());
 
-    vec![
+    Ok(vec![
         format!("--bind-mount=/run/flatpak/at-spi-bus={}", unix_path),
         if !suffix.is_empty() {
             format!("--env=AT_SPI_BUS_ADDRESS=unix:path=/run/flatpak/at-spi-bus{suffix}")
         } else {
             "--env=AT_SPI_BUS_ADDRESS=unix:path=/run/flatpak/at-spi-bus".to_string()
         },
-    ]
+    ])
 }

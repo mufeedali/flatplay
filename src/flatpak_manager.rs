@@ -27,6 +27,20 @@ pub struct FlatpakManager<'a> {
 }
 
 impl<'a> FlatpakManager<'a> {
+    fn compute_manifest_hash(path: &Path) -> Result<String> {
+        let content = fs::read(path)?;
+        let mut hasher = Sha256::new();
+        hasher.update(&content);
+        let result = hasher.finalize();
+
+        let mut hash = String::with_capacity(64);
+        for b in result {
+            use std::fmt::Write;
+            write!(&mut hash, "{:02x}", b)?;
+        }
+        Ok(hash)
+    }
+
     fn find_manifests(&self) -> Result<Vec<PathBuf>> {
         let current_dir = env::current_dir()?;
         let current_dir_canon = current_dir.canonicalize()?;
@@ -432,14 +446,7 @@ impl<'a> FlatpakManager<'a> {
 
     fn check_manifest_changed(&mut self) -> Result<()> {
         if let Some(manifest_path) = &self.state.active_manifest {
-            let manifest_content = fs::read(manifest_path)?;
-            let mut hasher = Sha256::new();
-            hasher.update(&manifest_content);
-            let hash = hasher
-                .finalize()
-                .iter()
-                .map(|b| format!("{:02x}", b))
-                .collect::<String>();
+            let hash = Self::compute_manifest_hash(manifest_path)?;
 
             if let Some(stored_hash) = &self.state.manifest_hash {
                 if *stored_hash != hash {
@@ -525,7 +532,9 @@ impl<'a> FlatpakManager<'a> {
                 .map(|(key, value)| format!("--env={key}={value}")),
         );
 
-        args.extend(get_a11y_bus_args());
+        if let Ok(a11y_args) = get_a11y_bus_args() {
+            args.extend(a11y_args);
+        }
 
         args.extend(manifest.finish_args.clone());
         args.push(path_to_str(&repo_dir)?.to_string());
@@ -714,16 +723,7 @@ impl<'a> FlatpakManager<'a> {
             self.state.active_manifest = Some(manifest_path.clone());
 
             // Update hash for the new manifest
-            let manifest_content = fs::read(&manifest_path)?;
-            let mut hasher = Sha256::new();
-            hasher.update(&manifest_content);
-            self.state.manifest_hash = Some(
-                hasher
-                    .finalize()
-                    .iter()
-                    .map(|b| format!("{:02x}", b))
-                    .collect::<String>(),
-            );
+            self.state.manifest_hash = Some(Self::compute_manifest_hash(&manifest_path)?);
 
             self.state.save()?;
         }

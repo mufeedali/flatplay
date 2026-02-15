@@ -8,19 +8,18 @@ pub fn is_valid_dbus_name(name: &str) -> bool {
     if name.is_empty() || name.len() > 255 {
         return false;
     }
-    let elements: Vec<&str> = name.split('.').collect();
-    if elements.len() < 2 {
+
+    if !name.contains('.') {
         return false;
     }
-    elements.iter().all(|element| {
-        if let Some(first_char) = element.chars().next() {
-            !element.is_empty()
-                && !first_char.is_ascii_digit()
-                && element
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        } else {
-            false
+
+    name.split('.').all(|element| {
+        let mut chars = element.chars();
+        match chars.next() {
+            Some(c) if !c.is_ascii_digit() => {
+                chars.all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            }
+            _ => false,
         }
     })
 }
