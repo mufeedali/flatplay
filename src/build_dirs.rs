@@ -3,7 +3,7 @@ use std::path::PathBuf;
 const BUILD_DIR: &str = ".flatplay";
 
 pub struct BuildDirs {
-    pub base: PathBuf,
+    base: PathBuf,
 }
 
 impl BuildDirs {

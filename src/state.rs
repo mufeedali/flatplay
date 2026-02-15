@@ -15,7 +15,6 @@ pub struct State {
     pub dependencies_updated: bool,
     pub dependencies_built: bool,
     pub application_built: bool,
-    pub process_group_id: Option<u32>,
     #[serde(skip)]
     pub base_dir: PathBuf,
 }
@@ -28,7 +27,6 @@ impl Default for State {
             dependencies_updated: false,
             dependencies_built: false,
             application_built: false,
-            process_group_id: None,
             base_dir: PathBuf::new(),
         }
     }
@@ -86,12 +84,10 @@ mod tests {
         assert!(!state.dependencies_updated);
         assert!(!state.dependencies_built);
         assert!(!state.application_built);
-        assert_eq!(state.process_group_id, None);
 
         state.active_manifest = Some(PathBuf::from("/tmp/manifest.json"));
         state.manifest_hash = Some("abc123".to_string());
         state.dependencies_updated = true;
-        state.process_group_id = Some(12345);
 
         state.save().unwrap();
 
@@ -103,7 +99,6 @@ mod tests {
         assert_eq!(loaded_state.manifest_hash, Some("abc123".to_string()));
         assert!(loaded_state.dependencies_updated);
         assert!(!loaded_state.dependencies_built);
-        assert_eq!(loaded_state.process_group_id, Some(12345));
     }
 
     #[test]
@@ -114,13 +109,11 @@ mod tests {
         state.dependencies_updated = true;
         state.dependencies_built = true;
         state.application_built = true;
-        state.process_group_id = Some(999);
 
         state.reset();
 
         assert!(!state.dependencies_updated);
         assert!(!state.dependencies_built);
         assert!(!state.application_built);
-        assert_eq!(state.process_group_id, Some(999));
     }
 }

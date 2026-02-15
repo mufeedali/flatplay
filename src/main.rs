@@ -1,24 +1,35 @@
 use clap::{CommandFactory, Parser, Subcommand};
-use colored::*;
 use nix::unistd::{getpid, setpgid};
 use std::path::PathBuf;
-use std::process::{Command, Stdio, exit};
+use std::process::{Command, ExitCode, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 mod build_dirs;
 mod command;
 mod flatpak_manager;
+mod instance_lock;
 mod manifest;
-mod process;
 mod state;
 mod utils;
 
 use flatpak_manager::FlatpakManager;
-use process::{PgidGuard, is_process_running, kill_process_group};
+use instance_lock::{InstanceLock, request_shutdown_from_lock};
 use state::State;
+use utils::verbose;
+
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn is_interrupted() -> bool {
+    INTERRUPTED.load(Ordering::SeqCst)
+}
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
+    /// Enable verbose output
+    #[arg(short, long, global = true)]
+    verbose: bool,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -58,14 +69,6 @@ enum Commands {
     },
 }
 
-macro_rules! handle_command {
-    ($command:expr) => {
-        if let Err(err) = $command {
-            eprintln!("{}: {}", "Error".red(), err);
-        }
-    };
-}
-
 fn get_base_dir() -> PathBuf {
     let output = Command::new("git")
         .arg("rev-parse")
@@ -77,6 +80,7 @@ fn get_base_dir() -> PathBuf {
     {
         return PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
     }
+    verbose("Not in a git repository, using current directory as base");
     PathBuf::from(".")
 }
 
@@ -122,78 +126,98 @@ fn check_dependencies() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn main() {
-    let cli = Cli::parse();
-
-    if let Some(Commands::Completions { shell }) = cli.command {
-        use clap_complete::generate;
-        use std::io;
-        let mut cmd = Cli::command();
-        generate(shell, &mut cmd, "flatplay", &mut io::stdout());
-        return;
-    }
-
-    if let Err(err) = check_dependencies() {
-        eprintln!("{}: {}", "Error".red(), err);
-        exit(1);
-    }
+fn run(command: Option<Commands>) -> anyhow::Result<()> {
+    // Suppress default SIGINT exit so errors propagate through the return
+    // path, ensuring InstanceLock drops and cleans up the lock file.
+    ctrlc::set_handler(|| {
+        INTERRUPTED.store(true, Ordering::SeqCst);
+    })?;
 
     let base_dir = get_base_dir();
-    let mut state = State::load(base_dir.clone()).unwrap();
+    let mut state = State::load(base_dir.clone())?;
 
-    if cli.command.is_none() {
-        handle_command!(kill_process_group(&mut state));
-    } else if let Some(Commands::Stop) = cli.command {
-        handle_command!(kill_process_group(&mut state));
-        return;
+    if let Some(Commands::Stop) = &command {
+        request_shutdown_from_lock(&base_dir)?;
+        return Ok(());
     }
 
-    if let Some(pgid) = state.process_group_id
-        && is_process_running(pgid)
-    {
-        eprintln!(
-            "{}: Another instance of flatplay is already running (PID: {}).",
-            "Error".red(),
-            pgid
-        );
-        eprintln!("Run '{}' to terminate it.", "flatplay stop".bold().italic());
-        return;
+    let requires_build_runtime = !matches!(
+        command,
+        Some(Commands::SelectManifest { .. } | Commands::Clean)
+    );
+    if requires_build_runtime {
+        check_dependencies()?;
     }
 
     let pid = getpid();
-    if let Err(e) = setpgid(pid, pid) {
-        eprintln!("Failed to set process group ID: {e}");
-        return;
-    }
-    state.process_group_id = Some(pid.as_raw() as u32);
+    setpgid(pid, pid)
+        .map_err(|error| anyhow::anyhow!("Failed to set process group ID: {error}"))?;
+    let process_group_id = pid.as_raw() as u32;
 
-    let mut flatpak_manager = match FlatpakManager::new(&mut state) {
-        Ok(manager) => manager,
-        Err(e) => {
-            eprintln!("{}: {}", "Error".red(), e);
-            exit(1);
-        }
-    };
-    let _guard = PgidGuard::new(base_dir);
+    let _instance_lock = InstanceLock::acquire_or_takeover(&base_dir, process_group_id)?;
 
-    match &cli.command {
-        Some(Commands::Completions { .. }) => unreachable!(),
-        Some(Commands::Stop) => {}
-
-        Some(Commands::Build) => handle_command!(flatpak_manager.build()),
-        Some(Commands::BuildAndRun) => handle_command!(flatpak_manager.build_and_run()),
-        Some(Commands::Rebuild) => handle_command!(flatpak_manager.rebuild()),
-        Some(Commands::Run) => handle_command!(flatpak_manager.run()),
-        Some(Commands::UpdateDependencies) => {
-            handle_command!(flatpak_manager.update_dependencies())
-        }
-        Some(Commands::Clean) => handle_command!(flatpak_manager.clean()),
-        Some(Commands::RuntimeTerminal) => handle_command!(flatpak_manager.runtime_terminal()),
-        Some(Commands::BuildTerminal) => handle_command!(flatpak_manager.build_terminal()),
-        Some(Commands::ExportBundle) => handle_command!(flatpak_manager.export_bundle()),
+    match command {
         Some(Commands::SelectManifest { path }) => {
-            handle_command!(flatpak_manager.select_manifest(path.clone()))
+            let mut flatpak_manager = FlatpakManager::new(&mut state)?;
+            flatpak_manager.select_manifest(path)
         }
-        None => handle_command!(flatpak_manager.build_and_run()),
+        Some(Commands::Clean) => {
+            let mut flatpak_manager = FlatpakManager::new(&mut state)?;
+            flatpak_manager.clean()
+        }
+        None => {
+            let mut flatpak_manager = FlatpakManager::new(&mut state)?;
+            flatpak_manager.ensure_ready(true)?;
+            flatpak_manager.build_and_run()
+        }
+        _ => {
+            let mut flatpak_manager = FlatpakManager::new(&mut state)?;
+            flatpak_manager.ensure_ready(false)?;
+            match command {
+                Some(Commands::Build) => flatpak_manager.build(),
+                Some(Commands::BuildAndRun) => flatpak_manager.build_and_run(),
+                Some(Commands::Rebuild) => flatpak_manager.rebuild(),
+                Some(Commands::Run) => flatpak_manager.run(),
+                Some(Commands::UpdateDependencies) => flatpak_manager.update_dependencies(),
+                Some(Commands::RuntimeTerminal) => flatpak_manager.runtime_terminal(),
+                Some(Commands::BuildTerminal) => flatpak_manager.build_terminal(),
+                Some(Commands::ExportBundle) => flatpak_manager.export_bundle(),
+                Some(
+                    Commands::SelectManifest { .. }
+                    | Commands::Clean
+                    | Commands::Completions { .. }
+                    | Commands::Stop,
+                )
+                | None => unreachable!(),
+            }
+        }
+    }
+}
+
+fn main() -> ExitCode {
+    let cli = Cli::parse();
+    utils::set_verbose(cli.verbose);
+
+    match cli.command {
+        Some(Commands::Completions { shell }) => {
+            use clap_complete::generate;
+            let mut cmd = Cli::command();
+            generate(shell, &mut cmd, "flatplay", &mut std::io::stdout());
+            ExitCode::SUCCESS
+        }
+        command => {
+            if let Err(error) = run(command) {
+                // Check if this was an intentional interruption (Ctrl+C)
+                if crate::command::is_interrupted_error(&error) {
+                    eprintln!();
+                    utils::status_info("Interrupted");
+                    return ExitCode::from(130);
+                }
+                utils::status_error(format!("Error: {error}"));
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
     }
 }

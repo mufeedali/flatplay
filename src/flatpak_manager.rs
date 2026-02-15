@@ -11,7 +11,9 @@ use crate::build_dirs::BuildDirs;
 use crate::command::{flatpak_builder, run_command};
 use crate::manifest::{Manifest, Module, find_manifests_in_path};
 use crate::state::State;
-use crate::utils::{get_a11y_bus_args, get_host_env};
+use crate::utils::{
+    get_a11y_bus_args, get_host_env, status, status_info, status_success, status_warn, verbose,
+};
 
 use sha2::{Digest, Sha256};
 
@@ -60,7 +62,13 @@ impl<'a> FlatpakManager<'a> {
     fn auto_select_manifest(&mut self) -> Result<bool> {
         let manifests = self.find_manifests()?;
         if let Some(manifest_path) = manifests.first() {
-            println!("{} {:?}", "Auto-selected manifest:".green(), manifest_path);
+            let display_path = manifest_path
+                .strip_prefix(&self.state.base_dir)
+                .unwrap_or(manifest_path.as_path());
+            status_success(format!(
+                "Auto-selected manifest: {}",
+                display_path.display()
+            ));
             let manifest = Manifest::from_file(manifest_path)?;
             self.set_active_manifest(manifest_path.clone(), Some(manifest))?;
             Ok(true)
@@ -71,40 +79,72 @@ impl<'a> FlatpakManager<'a> {
 
     fn print_manifest_info(&self) {
         if let Some(manifest) = &self.manifest {
-            println!("{}", "Manifest Info:".bold().blue());
-            println!("  App ID: {}", manifest.id.yellow());
-            println!("  SDK: {}", manifest.sdk.cyan());
-            println!("  Runtime: {}", manifest.runtime.cyan());
-            println!("  Runtime Version: {}", manifest.runtime_version.cyan());
+            status_info(format!(
+                "Manifest: {} ({}//{})",
+                manifest.id, manifest.runtime, manifest.runtime_version
+            ));
+            verbose("Manifest Info:");
+            verbose(format!("  App ID: {}", manifest.id));
+            verbose(format!("  SDK: {}", manifest.sdk));
+            verbose(format!("  Runtime: {}", manifest.runtime));
+            verbose(format!("  Runtime Version: {}", manifest.runtime_version));
         }
     }
 
     pub fn new(state: &'a mut State) -> Result<Self> {
         let manifest = if let Some(path) = &state.active_manifest {
-            Some(Manifest::from_file(path)?)
+            match Manifest::from_file(path) {
+                Ok(manifest) => Some(manifest),
+                Err(error) => {
+                    verbose(format!(
+                        "Failed to load active manifest {:?}: {error:#}",
+                        path
+                    ));
+                    None
+                }
+            }
         } else {
             None
         };
         let build_dirs = BuildDirs::new(state.base_dir.clone());
-        let mut manager = Self {
+        Ok(Self {
             state,
             manifest,
             build_dirs,
-        };
-        if manager.manifest.is_none() && !manager.auto_select_manifest()? {
-            return Err(anyhow::anyhow!("No manifest found."));
+        })
+    }
+
+    pub fn ensure_ready(&mut self, allow_auto_select: bool) -> Result<()> {
+        if self.manifest.is_none() {
+            if allow_auto_select {
+                if let Some(path) = &self.state.active_manifest {
+                    let display_path = path.strip_prefix(&self.state.base_dir).unwrap_or(path);
+                    status_warn(format!(
+                        "Failed to load manifest at {}. Attempting to auto-select...",
+                        display_path.display()
+                    ));
+                }
+                if !self.auto_select_manifest()? {
+                    return Err(anyhow::anyhow!(
+                        "No manifests found in project. Run `flatplay select-manifest <path>` to specify a manifest."
+                    ));
+                }
+            } else {
+                return Err(anyhow::anyhow!(
+                    "No manifest selected. Run `flatplay select-manifest` to select a manifest."
+                ));
+            }
         }
 
-        // Print manifest info when we have one
-        if manager.manifest.is_some() {
-            manager.print_manifest_info();
-            manager.check_manifest_changed()?;
+        if self.manifest.is_some() {
+            self.print_manifest_info();
+            self.check_manifest_changed()?;
         }
 
-        manager.init()?;
-        manager.state.save()?;
+        self.init()?;
+        self.state.save()?;
 
-        Ok(manager)
+        Ok(())
     }
 
     fn is_build_initialized(&self) -> Result<bool> {
@@ -112,7 +152,6 @@ impl<'a> FlatpakManager<'a> {
         let files_dir = self.build_dirs.files_dir();
         let var_dir = self.build_dirs.var_dir();
 
-        // Check if all required directories and files exist
         // From gnome-builder: https://gitlab.gnome.org/GNOME/gnome-builder/-/blob/8579055f5047a0af5462e8a587b0742014d71d64/src/plugins/flatpak/gbp-flatpak-pipeline-addin.c#L220
         Ok(metadata_file.is_file() && files_dir.is_dir() && var_dir.is_dir())
     }
@@ -121,7 +160,7 @@ impl<'a> FlatpakManager<'a> {
         let manifest = self.manifest.as_ref().context("No manifest available")?;
         let repo_dir = self.build_dirs.repo_dir();
 
-        println!("{}", "Initializing build environment...".bold());
+        status(format!("{}", "Initializing build environment...".bold()));
         run_command(
             "flatpak",
             &[
@@ -136,7 +175,7 @@ impl<'a> FlatpakManager<'a> {
         )
     }
 
-    pub fn init(&mut self) -> Result<()> {
+    fn init(&mut self) -> Result<()> {
         if self.is_build_initialized()? {
             return Ok(());
         }
@@ -150,7 +189,6 @@ impl<'a> FlatpakManager<'a> {
         let repo_dir = self.build_dirs.repo_dir();
         let repo_dir_str = path_to_str(&repo_dir)?;
 
-        // Download sources for the application module first
         self.download_application_sources()?;
 
         if let Some(module) = manifest.modules.last() {
@@ -197,12 +235,10 @@ impl<'a> FlatpakManager<'a> {
         {
             let source_dir = self.build_dirs.build_dir().join(name);
 
-            // Remove existing source directory if it exists
             if source_dir.exists() {
                 fs::remove_dir_all(&source_dir)?;
             }
 
-            // Download sources based on their type
             for source in sources {
                 if let Some(source_type) = source.get("type").and_then(|v| v.as_str()) {
                     match source_type {
@@ -211,7 +247,7 @@ impl<'a> FlatpakManager<'a> {
                                 source.get("url").and_then(|v| v.as_str()),
                                 source.get("tag").and_then(|v| v.as_str()),
                             ) {
-                                println!("Cloning {} from {}", name, url);
+                                status(format!("Cloning {} from {}", name, url));
                                 run_command(
                                     "git",
                                     &[
@@ -229,14 +265,14 @@ impl<'a> FlatpakManager<'a> {
                         }
                         "dir" => {
                             // For dir sources, no download needed - source is already local
-                            println!("Using local directory source for {}", name);
+                            verbose(format!("Using local directory source for {}", name));
                         }
                         _ => {
                             // For other source types, we'll need to extend this
-                            println!(
+                            status_warn(format!(
                                 "Warning: Source type '{}' not yet supported for direct download",
                                 source_type
-                            );
+                            ));
                         }
                     }
                 }
@@ -374,7 +410,7 @@ impl<'a> FlatpakManager<'a> {
     }
 
     fn build_dependencies(&mut self) -> Result<()> {
-        println!("{}", "Building dependencies...".bold());
+        status(format!("{}", "Building dependencies...".bold()));
         let manifest = self.manifest.as_ref().context("No manifest available")?;
         let manifest_path = self
             .state
@@ -410,7 +446,7 @@ impl<'a> FlatpakManager<'a> {
     }
 
     pub fn update_dependencies(&mut self) -> Result<()> {
-        println!("{}", "Updating dependencies...".bold());
+        status(format!("{}", "Updating dependencies...".bold()));
 
         let manifest = self.manifest.as_ref().context("No manifest available")?;
         let manifest_path = self
@@ -450,16 +486,13 @@ impl<'a> FlatpakManager<'a> {
 
             if let Some(stored_hash) = &self.state.manifest_hash {
                 if *stored_hash != hash {
-                    println!("{}", "Manifest changed, resetting build state...".yellow());
+                    status_warn("Manifest changed, resetting build state...");
                     self.state.reset();
                     self.state.manifest_hash = Some(hash);
                     self.state.save()?;
                 }
             } else {
-                println!(
-                    "{}",
-                    "Manifest hash missing, resetting build state...".yellow()
-                );
+                status_warn("Manifest hash missing, resetting build state...");
                 self.state.reset();
                 self.state.manifest_hash = Some(hash);
                 self.state.save()?;
@@ -469,14 +502,6 @@ impl<'a> FlatpakManager<'a> {
     }
 
     pub fn build(&mut self) -> Result<()> {
-        if self.manifest.is_none() {
-            println!(
-                "{}",
-                "No manifest selected. Please run `select-manifest` first.".yellow()
-            );
-            return Ok(());
-        }
-
         if !self.state.dependencies_updated {
             self.update_dependencies()?;
         }
@@ -489,24 +514,21 @@ impl<'a> FlatpakManager<'a> {
     }
 
     pub fn rebuild(&mut self) -> Result<()> {
-        println!("{}", "Rebuilding application...".bold());
+        status(format!("{}", "Rebuilding application...".bold()));
         self.clean()?;
         self.build()
     }
 
     pub fn build_and_run(&mut self) -> Result<()> {
-        println!("{}", "Building and running application...".bold());
         self.build()?;
         self.run()
     }
 
     pub fn run(&self) -> Result<()> {
         if !self.state.application_built {
-            println!(
-                "{}",
-                "Application not built. Please run `build` first.".yellow()
-            );
-            return Ok(());
+            return Err(anyhow::anyhow!(
+                "Application not built. Please run `build` first."
+            ));
         }
         let manifest = self.manifest.as_ref().context("No manifest available")?;
         let repo_dir = self.build_dirs.repo_dir();
@@ -526,14 +548,20 @@ impl<'a> FlatpakManager<'a> {
             "--talk-name=org.a11y.Bus".to_string(),
         ];
 
+        let host_env = get_host_env();
+        verbose(format!(
+            "Forwarding host env vars: {:?}",
+            host_env.keys().collect::<Vec<_>>()
+        ));
         args.extend(
-            get_host_env()
+            host_env
                 .into_iter()
                 .map(|(key, value)| format!("--env={key}={value}")),
         );
 
-        if let Ok(a11y_args) = get_a11y_bus_args() {
-            args.extend(a11y_args);
+        match get_a11y_bus_args() {
+            Ok(a11y_args) => args.extend(a11y_args),
+            Err(error) => verbose(format!("a11y bus not available: {error:#}")),
         }
 
         args.extend(manifest.finish_args.clone());
@@ -550,11 +578,9 @@ impl<'a> FlatpakManager<'a> {
 
     pub fn export_bundle(&self) -> Result<()> {
         if !self.state.application_built {
-            println!(
-                "{}",
-                "Application not built. Please run `build` first.".yellow()
-            );
-            return Ok(());
+            return Err(anyhow::anyhow!(
+                "Application not built. Please run `build` first."
+            ));
         }
         let manifest = self.manifest.as_ref().context("No manifest available")?;
         let repo_dir = self.build_dirs.repo_dir();
@@ -616,20 +642,13 @@ impl<'a> FlatpakManager<'a> {
         let build_dir = self.build_dirs.build_dir();
         if fs::metadata(&build_dir).is_ok() {
             fs::remove_dir_all(&build_dir)?;
-            println!("{} Cleaned .flatplay directory.", "✔".green());
+            status_success("Cleaned .flatplay directory.");
             self.state.reset();
         }
         Ok(())
     }
 
     pub fn runtime_terminal(&self) -> Result<()> {
-        if self.manifest.is_none() {
-            println!(
-                "{}",
-                "No manifest selected. Please run `select-manifest` first.".yellow()
-            );
-            return Ok(());
-        }
         let manifest = self.manifest.as_ref().context("No manifest available")?;
         let sdk_id = format!("{}//{}", manifest.sdk, manifest.runtime_version);
         run_command(
@@ -640,13 +659,6 @@ impl<'a> FlatpakManager<'a> {
     }
 
     pub fn build_terminal(&self) -> Result<()> {
-        if self.manifest.is_none() {
-            println!(
-                "{}",
-                "No manifest selected. Please run `select-manifest` first.".yellow()
-            );
-            return Ok(());
-        }
         let repo_dir = self.build_dirs.repo_dir();
         run_command(
             "flatpak",
@@ -655,7 +667,6 @@ impl<'a> FlatpakManager<'a> {
         )
     }
 
-    /// Manifest selection command endpoint.
     pub fn select_manifest(&mut self, path: Option<PathBuf>) -> Result<()> {
         if let Some(path) = path {
             let manifest_path = if path.is_absolute() {
@@ -670,14 +681,17 @@ impl<'a> FlatpakManager<'a> {
                 ));
             }
             let manifest = Manifest::from_file(&manifest_path)?;
-            return self.set_active_manifest(manifest_path, Some(manifest));
+            self.set_active_manifest(manifest_path, Some(manifest))?;
+            self.print_manifest_info();
+            self.print_selection_message();
+            return Ok(());
         }
 
-        println!("{}", "Searching for manifest files...".bold());
+        verbose("Searching for manifest files...");
         let manifests = self.find_manifests()?;
 
         if manifests.is_empty() {
-            println!("{}", "No manifest files found.".yellow());
+            status_warn("No manifest files found.");
             return Ok(());
         }
 
@@ -686,7 +700,7 @@ impl<'a> FlatpakManager<'a> {
             .filter_map(|p| {
                 let path_str = p.to_str()?.to_string();
                 Some(if self.state.active_manifest.as_ref() == Some(p) {
-                    format!("{} {}", "*".green().bold(), path_str)
+                    format!("* {}", path_str)
                 } else {
                     format!("  {path_str}")
                 })
@@ -705,10 +719,12 @@ impl<'a> FlatpakManager<'a> {
             .default(default_selection)
             .interact()?;
 
-        self.set_active_manifest(manifests[selection].clone(), None)
+        self.set_active_manifest(manifests[selection].clone(), None)?;
+        self.print_manifest_info();
+        self.print_selection_message();
+        Ok(())
     }
 
-    /// Sets the active manifest and updates the state.
     fn set_active_manifest(
         &mut self,
         manifest_path: PathBuf,
@@ -716,31 +732,34 @@ impl<'a> FlatpakManager<'a> {
     ) -> Result<()> {
         let should_clean = self.state.active_manifest.as_ref() != Some(&manifest_path);
         if should_clean {
-            // Clean build directory and progress since manifest has changed.
             self.clean()?;
 
-            // Change active manifest in state.
             self.state.active_manifest = Some(manifest_path.clone());
 
-            // Update hash for the new manifest
             self.state.manifest_hash = Some(Self::compute_manifest_hash(&manifest_path)?);
 
             self.state.save()?;
         }
-        if let Some(manifest) = manifest {
-            self.manifest = Some(manifest);
-        }
 
-        // Print manifest info
-        self.print_manifest_info();
-
-        println!(
-            "{} {:?}. You can now run `{}`.",
-            "Selected manifest:".green(),
-            manifest_path,
-            "flatplay".bold().italic(),
-        );
+        self.manifest = if let Some(manifest) = manifest {
+            Some(manifest)
+        } else {
+            Some(Manifest::from_file(&manifest_path)?)
+        };
 
         Ok(())
+    }
+
+    fn print_selection_message(&self) {
+        if let Some(manifest_path) = &self.state.active_manifest {
+            let display_path = manifest_path
+                .strip_prefix(&self.state.base_dir)
+                .unwrap_or(manifest_path.as_path());
+
+            status_success(format!(
+                "Selected manifest: {}. You can now run `flatplay`.",
+                display_path.display(),
+            ));
+        }
     }
 }
