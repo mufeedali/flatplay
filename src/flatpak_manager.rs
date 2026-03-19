@@ -114,16 +114,48 @@ impl<'a> FlatpakManager<'a> {
         })
     }
 
+    pub fn validate_manifest(&self, allow_auto_select: bool) -> Result<()> {
+        if self.manifest.is_some() {
+            return Ok(());
+        }
+
+        if let Some(path) = &self.state.active_manifest {
+            if Manifest::from_file(path).is_ok() {
+                return Ok(());
+            }
+
+            if !allow_auto_select {
+                return Err(anyhow::anyhow!(
+                    "Active manifest is invalid. Run `flatplay select-manifest` to choose a different manifest."
+                ));
+            }
+
+            let display_path = path.strip_prefix(&self.state.base_dir).unwrap_or(path);
+            status_warn(format!(
+                "Failed to load manifest at {}. Attempting to auto-select...",
+                display_path.display()
+            ));
+        }
+
+        if !allow_auto_select {
+            return Err(anyhow::anyhow!(
+                "No manifest selected. Run `flatplay select-manifest` to select a manifest."
+            ));
+        }
+
+        let manifests = self.find_manifests()?;
+        if manifests.is_empty() {
+            return Err(anyhow::anyhow!(
+                "No manifests found in project. Run `flatplay select-manifest <path>` to specify a manifest."
+            ));
+        }
+
+        Ok(())
+    }
+
     pub fn ensure_ready(&mut self, allow_auto_select: bool) -> Result<()> {
         if self.manifest.is_none() {
             if allow_auto_select {
-                if let Some(path) = &self.state.active_manifest {
-                    let display_path = path.strip_prefix(&self.state.base_dir).unwrap_or(path);
-                    status_warn(format!(
-                        "Failed to load manifest at {}. Attempting to auto-select...",
-                        display_path.display()
-                    ));
-                }
                 if !self.auto_select_manifest()? {
                     return Err(anyhow::anyhow!(
                         "No manifests found in project. Run `flatplay select-manifest <path>` to specify a manifest."

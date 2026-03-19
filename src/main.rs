@@ -127,8 +127,6 @@ fn check_dependencies() -> anyhow::Result<()> {
 }
 
 fn run(command: Option<Commands>) -> anyhow::Result<()> {
-    // Suppress default SIGINT exit so errors propagate through the return
-    // path, ensuring InstanceLock drops and cleans up the lock file.
     ctrlc::set_handler(|| {
         INTERRUPTED.store(true, Ordering::SeqCst);
     })?;
@@ -149,6 +147,21 @@ fn run(command: Option<Commands>) -> anyhow::Result<()> {
         check_dependencies()?;
     }
 
+    if let Some(Commands::SelectManifest { path }) = &command {
+        request_shutdown_from_lock(&base_dir)?;
+        let mut flatpak_manager = FlatpakManager::new(&mut state)?;
+        return flatpak_manager.select_manifest(path.clone());
+    }
+
+    if let Some(Commands::Clean) = &command {
+        request_shutdown_from_lock(&base_dir)?;
+        let mut flatpak_manager = FlatpakManager::new(&mut state)?;
+        return flatpak_manager.clean();
+    }
+
+    let mut flatpak_manager = FlatpakManager::new(&mut state)?;
+    flatpak_manager.validate_manifest(command.is_none())?;
+
     let pid = getpid();
     setpgid(pid, pid)
         .map_err(|error| anyhow::anyhow!("Failed to set process group ID: {error}"))?;
@@ -156,41 +169,22 @@ fn run(command: Option<Commands>) -> anyhow::Result<()> {
 
     let _instance_lock = InstanceLock::acquire_or_takeover(&base_dir, process_group_id)?;
 
+    flatpak_manager.ensure_ready(command.is_none())?;
+
     match command {
-        Some(Commands::SelectManifest { path }) => {
-            let mut flatpak_manager = FlatpakManager::new(&mut state)?;
-            flatpak_manager.select_manifest(path)
-        }
-        Some(Commands::Clean) => {
-            let mut flatpak_manager = FlatpakManager::new(&mut state)?;
-            flatpak_manager.clean()
-        }
-        None => {
-            let mut flatpak_manager = FlatpakManager::new(&mut state)?;
-            flatpak_manager.ensure_ready(true)?;
-            flatpak_manager.build_and_run()
-        }
-        _ => {
-            let mut flatpak_manager = FlatpakManager::new(&mut state)?;
-            flatpak_manager.ensure_ready(false)?;
-            match command {
-                Some(Commands::Build) => flatpak_manager.build(),
-                Some(Commands::BuildAndRun) => flatpak_manager.build_and_run(),
-                Some(Commands::Rebuild) => flatpak_manager.rebuild(),
-                Some(Commands::Run) => flatpak_manager.run(),
-                Some(Commands::UpdateDependencies) => flatpak_manager.update_dependencies(),
-                Some(Commands::RuntimeTerminal) => flatpak_manager.runtime_terminal(),
-                Some(Commands::BuildTerminal) => flatpak_manager.build_terminal(),
-                Some(Commands::ExportBundle) => flatpak_manager.export_bundle(),
-                Some(
-                    Commands::SelectManifest { .. }
-                    | Commands::Clean
-                    | Commands::Completions { .. }
-                    | Commands::Stop,
-                )
-                | None => unreachable!(),
-            }
-        }
+        None => flatpak_manager.build_and_run(),
+        Some(Commands::Build) => flatpak_manager.build(),
+        Some(Commands::BuildAndRun) => flatpak_manager.build_and_run(),
+        Some(Commands::Rebuild) => flatpak_manager.rebuild(),
+        Some(Commands::Run) => flatpak_manager.run(),
+        Some(Commands::UpdateDependencies) => flatpak_manager.update_dependencies(),
+        Some(Commands::RuntimeTerminal) => flatpak_manager.runtime_terminal(),
+        Some(Commands::BuildTerminal) => flatpak_manager.build_terminal(),
+        Some(Commands::ExportBundle) => flatpak_manager.export_bundle(),
+        Some(Commands::SelectManifest { .. })
+        | Some(Commands::Clean)
+        | Some(Commands::Completions { .. })
+        | Some(Commands::Stop) => unreachable!(),
     }
 }
 
