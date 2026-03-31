@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0](https://github.com/mufeedali/flatplay/compare/v0.5.0...v0.6.0) - 2026-03-31
+
+### Added
+
+- Better dialog handling
+- [**breaking**] Several significant changes and fixes
+- Add ext dependency checks
+
+### Fixed
+
+- Fix lock handling issues
+- Fix unnecessary state file creation
+
+### Other
+
+- add strip
+- some improvements
+- *(deps)* bump sha2 from 0.10.9 to 0.11.0
+- Improve error handling, refactor manifest validation and hashing
+- *(deps)* update deps
+- *(deps)* update deps
+- *(deps)* update deps
+- *(deps)* update deps
+- *(deps)* update deps
+
 ## [0.5.0](https://github.com/mufeedali/flatplay/compare/v0.4.2...v0.5.0) - 2025-12-14
 
 ### Added
