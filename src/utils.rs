@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use colored::Colorize;
-use regex::Regex;
 use std::collections::HashMap;
 use std::env;
 use std::process::Command;
@@ -96,6 +95,28 @@ pub fn get_host_env() -> HashMap<String, String> {
     env_vars
 }
 
+fn parse_a11y_address(address: &str) -> Result<(String, String)> {
+    let mut s = address.trim().to_string();
+    s = s.replace("('", "");
+    s = s.replace("',)", "");
+    if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
+        s = s[1..s.len() - 1].to_string();
+    }
+
+    let prefix = "unix:path=";
+    if let Some(pos) = s.find(prefix) {
+        let rest = &s[pos + prefix.len()..];
+        match rest.split_once(',') {
+            Some((p, sfx)) if !p.is_empty() => Ok((p.to_string(), format!(",{}", sfx))),
+            Some((_p, _sfx)) => anyhow::bail!("Failed to parse a11y bus address"),
+            None if !rest.is_empty() => Ok((rest.to_string(), String::new())),
+            None => anyhow::bail!("Failed to parse a11y bus address"),
+        }
+    } else {
+        anyhow::bail!("Failed to parse a11y bus address");
+    }
+}
+
 pub fn get_a11y_bus_args() -> Result<Vec<String>> {
     let output = Command::new("gdbus")
         .args([
@@ -112,26 +133,56 @@ pub fn get_a11y_bus_args() -> Result<Vec<String>> {
         anyhow::bail!("gdbus a11y bus query failed with status: {}", output.status);
     }
 
-    let address = String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .replace("('", "")
-        .replace("',)", "");
-
-    static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
-    let re = RE.get_or_init(|| Regex::new(r"unix:path=([^,]+)(,.*)?").expect("hardcoded regex"));
-    let caps = re
-        .captures(&address)
-        .context("Failed to parse a11y bus address")?;
-
-    let unix_path = caps.get(1).map_or("", |m| m.as_str());
-    let suffix = caps.get(2).map_or("", |m| m.as_str());
+    let address = String::from_utf8_lossy(&output.stdout).to_string();
+    let (unix_path, suffix) = parse_a11y_address(&address)?;
 
     Ok(vec![
         format!("--bind-mount=/run/flatpak/at-spi-bus={}", unix_path),
         if !suffix.is_empty() {
-            format!("--env=AT_SPI_BUS_ADDRESS=unix:path=/run/flatpak/at-spi-bus{suffix}")
+            format!(
+                "--env=AT_SPI_BUS_ADDRESS=unix:path=/run/flatpak/at-spi-bus{}",
+                suffix
+            )
         } else {
             "--env=AT_SPI_BUS_ADDRESS=unix:path=/run/flatpak/at-spi-bus".to_string()
         },
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_ok() {
+        let cases = [
+            (
+                "('unix:path=/run/user/1000/bus',)",
+                "/run/user/1000/bus",
+                "",
+            ),
+            (
+                "('unix:path=/run/user/1000/bus,unix:abstract=/tmp/abc',)",
+                "/run/user/1000/bus",
+                ",unix:abstract=/tmp/abc",
+            ),
+            (
+                "unix:path=/run/user/1000/bus,foo=bar",
+                "/run/user/1000/bus",
+                ",foo=bar",
+            ),
+        ];
+
+        for (input, exp_path, exp_suffix) in cases {
+            let (path, suffix) = parse_a11y_address(input).unwrap();
+            assert_eq!(path, exp_path);
+            assert_eq!(suffix, exp_suffix);
+        }
+    }
+
+    #[test]
+    fn parse_err() {
+        assert!(parse_a11y_address("no unix path here").is_err());
+        assert!(parse_a11y_address("unix:path=,foo=bar").is_err());
+    }
 }
