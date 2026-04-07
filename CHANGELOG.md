@@ -11,26 +11,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Better dialog handling
-- [**breaking**] Several significant changes and fixes
-- Add ext dependency checks
+- Add global `--verbose` flag for more detailed output
+- Add some external dependency checks
 
 ### Fixed
 
-- Fix lock handling issues
-- Fix unnecessary state file creation
+- [**breaking**] Fix several issues with process management
+- Prevent unnecessary state file creation when a project is not a Flatpak project
+
+### Changed
+
+- Nicer, hopefully clearer CLI output
+- Some build optimizations
 
 ### Other
 
-- add strip
-- some improvements
-- *(deps)* bump sha2 from 0.10.9 to 0.11.0
-- Improve error handling, refactor manifest validation and hashing
-- *(deps)* update deps
-- *(deps)* update deps
-- *(deps)* update deps
-- *(deps)* update deps
-- *(deps)* update deps
+- Update several dependencies
 
 ## [0.5.0](https://github.com/mufeedali/flatplay/compare/v0.4.2...v0.5.0) - 2025-12-14
 
