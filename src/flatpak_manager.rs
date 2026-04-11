@@ -284,6 +284,7 @@ impl<'a> FlatpakManager<'a> {
                                     "git",
                                     &[
                                         "clone",
+                                        "--recurse-submodules",
                                         "--branch",
                                         tag,
                                         "--depth",
