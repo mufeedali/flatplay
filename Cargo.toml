@@ -22,7 +22,7 @@ colored = "3.1.1"
 console = "0.16"
 ctrlc = "3"
 walkdir = "2.5.0"
-clap_complete = "4.6.0"
+clap_complete = "4.6.2"
 nix = { version = "0.31.2", features = ["fs", "process", "signal", "user"] }
 sha2 = "0.11"
 
