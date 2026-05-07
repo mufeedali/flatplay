@@ -61,7 +61,7 @@ impl<'a> FlatpakManager<'a> {
 
     fn auto_select_manifest(&mut self) -> Result<bool> {
         let manifests = self.find_manifests()?;
-        if let Some(manifest_path) = manifests.first() {
+        if let Some(manifest_path) = manifests.into_iter().next() {
             let display_path = manifest_path
                 .strip_prefix(&self.state.base_dir)
                 .unwrap_or(manifest_path.as_path());
@@ -69,8 +69,8 @@ impl<'a> FlatpakManager<'a> {
                 "Auto-selected manifest: {}",
                 display_path.display()
             ));
-            let manifest = Manifest::from_file(manifest_path)?;
-            self.set_active_manifest(manifest_path.clone(), Some(manifest))?;
+            let manifest = Manifest::from_file(&manifest_path)?;
+            self.set_active_manifest(manifest_path, Some(manifest))?;
             Ok(true)
         } else {
             Ok(false)

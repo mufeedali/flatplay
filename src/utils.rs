@@ -3,16 +3,16 @@ use colored::Colorize;
 use std::collections::HashMap;
 use std::env;
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 
-static VERBOSE: AtomicBool = AtomicBool::new(false);
+static VERBOSE: OnceLock<bool> = OnceLock::new();
 
 pub fn set_verbose(enabled: bool) {
-    VERBOSE.store(enabled, Ordering::Relaxed);
+    let _ = VERBOSE.set(enabled);
 }
 
 pub fn is_verbose() -> bool {
-    VERBOSE.load(Ordering::Relaxed)
+    VERBOSE.get().copied().unwrap_or(false)
 }
 
 pub fn verbose(message: impl std::fmt::Display) {
@@ -96,9 +96,7 @@ pub fn get_host_env() -> HashMap<String, String> {
 }
 
 fn parse_a11y_address(address: &str) -> Result<(String, String)> {
-    let mut s = address.trim().to_string();
-    s = s.replace("('", "");
-    s = s.replace("',)", "");
+    let mut s = address.trim().replace("('", "").replace("',)", "");
     if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
         s = s[1..s.len() - 1].to_string();
     }
@@ -133,7 +131,7 @@ pub fn get_a11y_bus_args() -> Result<Vec<String>> {
         anyhow::bail!("gdbus a11y bus query failed with status: {}", output.status);
     }
 
-    let address = String::from_utf8_lossy(&output.stdout).to_string();
+    let address = String::from_utf8_lossy(&output.stdout);
     let (unix_path, suffix) = parse_a11y_address(&address)?;
 
     Ok(vec![
