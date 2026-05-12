@@ -1,3 +1,4 @@
+use anyhow::Context;
 use clap::{CommandFactory, Parser, Subcommand};
 use nix::unistd::{getpid, setpgid};
 use std::path::PathBuf;
@@ -69,19 +70,22 @@ enum Commands {
     },
 }
 
-fn get_base_dir() -> PathBuf {
+fn get_base_dir() -> anyhow::Result<PathBuf> {
     let output = Command::new("git")
         .arg("rev-parse")
         .arg("--show-toplevel")
         .output();
 
-    if let Ok(output) = output
+    let raw = if let Ok(output) = output
         && output.status.success()
     {
-        return PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
-    }
-    verbose("Not in a git repository, using current directory as base");
-    PathBuf::from(".")
+        PathBuf::from(String::from_utf8_lossy(&output.stdout).trim())
+    } else {
+        verbose("Not in a git repository, using current directory as base");
+        PathBuf::from(".")
+    };
+    raw.canonicalize()
+        .context("Failed to resolve base directory")
 }
 
 fn check_dependencies() -> anyhow::Result<()> {
@@ -131,7 +135,7 @@ fn run(command: Option<Commands>) -> anyhow::Result<()> {
         INTERRUPTED.store(true, Ordering::SeqCst);
     })?;
 
-    let base_dir = get_base_dir();
+    let base_dir = get_base_dir()?;
     let mut state = State::load(base_dir.clone())?;
 
     if let Some(Commands::Stop) = &command {

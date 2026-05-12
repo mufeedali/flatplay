@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use colored::Colorize;
 use std::collections::HashMap;
 use std::env;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
@@ -145,6 +146,93 @@ pub fn get_a11y_bus_args() -> Result<Vec<String>> {
             "--env=AT_SPI_BUS_ADDRESS=unix:path=/run/flatpak/at-spi-bus".to_string()
         },
     ])
+}
+
+fn path_exists(path: &str) -> bool {
+    Path::new(path).exists()
+}
+
+pub fn build_font_config() -> Result<PathBuf> {
+    let home = env::var("HOME").unwrap_or_default();
+    let cache = env::var("XDG_CACHE_HOME").unwrap_or_else(|_| format!("{home}/.cache"));
+    let data = env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{home}/.local/share"));
+    let mapped_font_file = format!("{cache}/font-dirs.xml");
+    let config_path = PathBuf::from(&mapped_font_file);
+
+    let mut font_dir_content = String::from(
+        "<?xml version=\"1.0\"?>\n\
+         <!DOCTYPE fontconfig SYSTEM \"urn:fontconfig:fonts.dtd\">\n\
+         <fontconfig>\n",
+    );
+
+    if path_exists("/usr/share/fonts") {
+        font_dir_content
+            .push_str("\t<remap-dir as-path=\"/usr/share/fonts\">/run/host/fonts</remap-dir>\n");
+    }
+
+    if path_exists("/usr/local/share/fonts") {
+        font_dir_content.push_str(
+            "\t<remap-dir as-path=\"/usr/local/share/fonts\">/run/host/local-fonts</remap-dir>\n",
+        );
+    }
+
+    for user_font_dir in [format!("{data}/fonts"), format!("{home}/.fonts")] {
+        if path_exists(&user_font_dir) {
+            font_dir_content.push_str(&format!(
+                "\t<remap-dir as-path=\"{user_font_dir}\">/run/host/user-fonts</remap-dir>\n",
+            ));
+        }
+    }
+
+    font_dir_content.push_str("</fontconfig>\n");
+    std::fs::write(&mapped_font_file, font_dir_content).context("Failed to write font-dirs.xml")?;
+
+    Ok(config_path)
+}
+
+pub fn get_fonts_args(font_config_path: &Path) -> Result<Vec<String>> {
+    let mut args: Vec<String> = Vec::new();
+    let home = env::var("HOME").unwrap_or_default();
+    let cache = env::var("XDG_CACHE_HOME").unwrap_or_else(|_| format!("{home}/.cache"));
+    let data = env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{home}/.local/share"));
+
+    if path_exists("/usr/share/fonts") {
+        args.push("--bind-mount=/run/host/fonts=/usr/share/fonts".to_string());
+    }
+
+    if path_exists("/usr/local/share/fonts") {
+        args.push("--bind-mount=/run/host/local-fonts=/usr/local/share/fonts".to_string());
+    }
+
+    for cache_dir in ["/usr/lib/fontconfig/cache", "/var/cache/fontconfig"] {
+        if path_exists(cache_dir) {
+            args.push(format!("--bind-mount=/run/host/fonts-cache={cache_dir}"));
+            break;
+        }
+    }
+
+    for user_font_dir in [format!("{data}/fonts"), format!("{home}/.fonts")] {
+        if path_exists(&user_font_dir) {
+            args.push(format!("--filesystem={user_font_dir}:ro"));
+        }
+    }
+
+    let user_cache_dir = format!("{cache}/fontconfig");
+    if path_exists(&user_cache_dir) {
+        args.push(format!("--filesystem={user_cache_dir}:ro"));
+        args.push(format!(
+            "--bind-mount=/run/host/user-fonts-cache={user_cache_dir}"
+        ));
+    }
+
+    let font_config_path = font_config_path
+        .to_str()
+        .context("Font config path contains invalid UTF-8")?;
+    args.push(format!(
+        "--bind-mount=/run/host/font-dirs.xml={font_config_path}"
+    ));
+
+    Ok(args)
 }
 
 #[cfg(test)]

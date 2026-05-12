@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -24,18 +26,37 @@ pub fn is_valid_dbus_name(name: &str) -> bool {
     })
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[serde(rename_all = "kebab-case")]
+pub struct BuildOptions {
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    #[serde(default)]
+    pub config_opts: Vec<String>,
+    pub prepend_path: Option<String>,
+    pub append_path: Option<String>,
+    pub prepend_ld_library_path: Option<String>,
+    pub append_ld_library_path: Option<String>,
+    pub prepend_pkg_config_path: Option<String>,
+    pub append_pkg_config_path: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(untagged)]
+#[allow(clippy::large_enum_variant)]
 pub enum Module {
+    #[serde(rename_all = "kebab-case")]
     Object {
         name: String,
         #[serde(default)]
         buildsystem: Option<String>,
-        #[serde(rename = "config-opts", default)]
+        #[serde(default)]
         config_opts: Option<Vec<String>>,
-        #[serde(rename = "build-commands", default)]
+        #[serde(default)]
         build_commands: Option<Vec<String>>,
-        #[serde(rename = "post-install", default)]
+        #[serde(default)]
+        build_options: Option<BuildOptions>,
+        #[serde(default)]
         post_install: Option<Vec<String>>,
         #[serde(default)]
         sources: Vec<serde_json::Value>,
@@ -44,22 +65,24 @@ pub enum Module {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "kebab-case")]
 pub struct Manifest {
     #[serde(alias = "app-id")]
     pub id: String,
     pub sdk: String,
     pub runtime: String,
-    #[serde(rename = "runtime-version")]
     pub runtime_version: String,
     pub command: String,
-    #[serde(rename = "x-run-args")]
+    #[serde(default)]
     pub x_run_args: Option<Vec<String>>,
     #[serde(default)]
     pub modules: Vec<Module>,
-    #[serde(rename = "finish-args", default)]
+    #[serde(default)]
     pub finish_args: Vec<String>,
-    #[serde(rename = "build-options", default)]
-    pub build_options: serde_json::Value,
+    #[serde(default)]
+    pub build_options: BuildOptions,
+    #[serde(default)]
+    pub sdk_extensions: Vec<String>,
     #[serde(default)]
     pub cleanup: Vec<String>,
 }
@@ -76,6 +99,114 @@ impl Manifest {
             return Err(anyhow::anyhow!("Invalid application ID: {}", manifest.id));
         }
         Ok(manifest)
+    }
+
+    pub fn finish_args_filtered(&self) -> Vec<String> {
+        self.finish_args
+            .iter()
+            .filter(|arg| {
+                let key = arg.split('=').next().unwrap_or("");
+                key != "--metadata" && key != "--require-version"
+            })
+            .cloned()
+            .collect()
+    }
+
+    pub fn merged_config_opts<'a>(
+        &'a self,
+        module_config_opts: Option<&'a [String]>,
+    ) -> Vec<&'a str> {
+        self.build_options
+            .config_opts
+            .iter()
+            .chain(module_config_opts.into_iter().flatten())
+            .map(|s| s.as_str())
+            .collect()
+    }
+
+    pub fn merged_env(
+        &self,
+        module_build_options: Option<&BuildOptions>,
+    ) -> HashMap<String, String> {
+        let mut merged = self.build_options.env.clone();
+        if let Some(mbo) = module_build_options {
+            merged.extend(mbo.env.clone());
+        }
+        merged
+    }
+
+    pub fn path_overrides(&self, module_build_options: Option<&BuildOptions>) -> Vec<String> {
+        let mut overrides = Vec::new();
+
+        let mpp = module_build_options.and_then(|b| b.prepend_path.as_deref());
+        let mpa = module_build_options.and_then(|b| b.append_path.as_deref());
+        let mlp = module_build_options.and_then(|b| b.prepend_ld_library_path.as_deref());
+        let mla = module_build_options.and_then(|b| b.append_ld_library_path.as_deref());
+        let mppc = module_build_options.and_then(|b| b.prepend_pkg_config_path.as_deref());
+        let mapc = module_build_options.and_then(|b| b.append_pkg_config_path.as_deref());
+
+        if let Some(arg) = Self::build_path_override(
+            "PATH",
+            &["/app/bin", "/usr/bin"],
+            self.build_options.prepend_path.as_deref(),
+            mpp,
+            self.build_options.append_path.as_deref(),
+            mpa,
+        ) {
+            overrides.push(arg);
+        }
+
+        if let Some(arg) = Self::build_path_override(
+            "LD_LIBRARY_PATH",
+            &["/app/lib"],
+            self.build_options.prepend_ld_library_path.as_deref(),
+            mlp,
+            self.build_options.append_ld_library_path.as_deref(),
+            mla,
+        ) {
+            overrides.push(arg);
+        }
+
+        if let Some(arg) = Self::build_path_override(
+            "PKG_CONFIG_PATH",
+            &[
+                "/app/lib/pkgconfig",
+                "/app/share/pkgconfig",
+                "/usr/lib/pkgconfig",
+                "/usr/share/pkgconfig",
+            ],
+            self.build_options.prepend_pkg_config_path.as_deref(),
+            mppc,
+            self.build_options.append_pkg_config_path.as_deref(),
+            mapc,
+        ) {
+            overrides.push(arg);
+        }
+
+        overrides
+    }
+
+    fn build_path_override(
+        var: &str,
+        defaults: &[&str],
+        manifest_prepend: Option<&str>,
+        module_prepend: Option<&str>,
+        manifest_append: Option<&str>,
+        module_append: Option<&str>,
+    ) -> Option<String> {
+        let host_value = env::var(var).ok();
+        let parts: Vec<&str> = manifest_prepend
+            .into_iter()
+            .chain(module_prepend)
+            .chain(host_value.as_deref())
+            .chain(defaults.iter().copied())
+            .chain(manifest_append)
+            .chain(module_append)
+            .collect();
+        if parts.is_empty() {
+            return None;
+        }
+        Some(format!("--env={var}={}", parts.join(":")))
     }
 }
 

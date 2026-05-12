@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 const STATE_DIR: &str = ".flatplay";
@@ -38,6 +38,9 @@ impl State {
     }
 
     pub fn load(base_dir: PathBuf) -> Result<Self> {
+        let base_dir = base_dir
+            .canonicalize()
+            .context("Failed to resolve state directory")?;
         let state_file = Self::state_file_path(&base_dir);
         if !state_file.exists() {
             return Ok(State {
