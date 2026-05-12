@@ -17,15 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
-- *(deps)* bump clap_complete from 4.6.3 to 4.6.5
-- *(deps)* bump nix from 0.31.2 to 0.31.3
-- *(deps)* bump serde-saphyr from 0.0.25 to 0.0.26 ([#72](https://github.com/mufeedali/flatplay/pull/72))
-- *(deps)* bump clap_complete from 4.6.2 to 4.6.3
-- *(deps)* bump serde-saphyr from 0.0.24 to 0.0.25
-- *(deps)* bump serde-saphyr from 0.0.23 to 0.0.24
-- *(deps)* bump clap from 4.6.0 to 4.6.1
-- *(deps)* bump clap_complete from 4.6.0 to 4.6.2
-- fix changelog
+- *(deps)* bump several
 
 ## [0.6.0](https://github.com/mufeedali/flatplay/compare/v0.5.0...v0.6.0) - 2026-03-31
 
