@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0](https://github.com/mufeedali/flatplay/compare/v0.6.0...v0.7.0) - 2026-05-12
+
+### Fixed
+
+- [**breaking**] fix flatpak build
+- minor stuff
+- pull submodules for app source
+
+### Other
+
+- *(deps)* bump several
+
 ## [0.6.0](https://github.com/mufeedali/flatplay/compare/v0.5.0...v0.6.0) - 2026-03-31
 
 ### Added
