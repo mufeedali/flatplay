@@ -130,15 +130,15 @@ fn check_dependencies() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run(command: Option<Commands>) -> anyhow::Result<()> {
+fn run(command: Option<&Commands>) -> anyhow::Result<()> {
     ctrlc::set_handler(|| {
         INTERRUPTED.store(true, Ordering::SeqCst);
     })?;
 
     let base_dir = get_base_dir()?;
-    let mut state = State::load(base_dir.clone())?;
+    let mut state = State::load(&base_dir)?;
 
-    if let Some(Commands::Stop) = &command {
+    if matches!(&command, Some(Commands::Stop)) {
         request_shutdown_from_lock(&base_dir)?;
         return Ok(());
     }
@@ -153,42 +153,43 @@ fn run(command: Option<Commands>) -> anyhow::Result<()> {
 
     if let Some(Commands::SelectManifest { path }) = &command {
         request_shutdown_from_lock(&base_dir)?;
-        let mut flatpak_manager = FlatpakManager::new(&mut state)?;
+        let mut flatpak_manager = FlatpakManager::new(&mut state);
         return flatpak_manager.select_manifest(path.clone());
     }
 
-    if let Some(Commands::Clean) = &command {
+    if matches!(&command, Some(Commands::Clean)) {
         request_shutdown_from_lock(&base_dir)?;
-        let mut flatpak_manager = FlatpakManager::new(&mut state)?;
+        let mut flatpak_manager = FlatpakManager::new(&mut state);
         return flatpak_manager.clean();
     }
 
-    let mut flatpak_manager = FlatpakManager::new(&mut state)?;
+    let mut flatpak_manager = FlatpakManager::new(&mut state);
     flatpak_manager.validate_manifest(command.is_none())?;
 
     let pid = getpid();
     setpgid(pid, pid)
         .map_err(|error| anyhow::anyhow!("Failed to set process group ID: {error}"))?;
-    let process_group_id = pid.as_raw() as u32;
+    let process_group_id = pid.as_raw().cast_unsigned();
 
     let _instance_lock = InstanceLock::acquire_or_takeover(&base_dir, process_group_id)?;
 
     flatpak_manager.ensure_ready(command.is_none())?;
 
     match command {
-        None => flatpak_manager.build_and_run(),
+        None | Some(Commands::BuildAndRun) => flatpak_manager.build_and_run(),
         Some(Commands::Build) => flatpak_manager.build(),
-        Some(Commands::BuildAndRun) => flatpak_manager.build_and_run(),
         Some(Commands::Rebuild) => flatpak_manager.rebuild(),
         Some(Commands::Run) => flatpak_manager.run(),
         Some(Commands::UpdateDependencies) => flatpak_manager.update_dependencies(),
         Some(Commands::RuntimeTerminal) => flatpak_manager.runtime_terminal(),
         Some(Commands::BuildTerminal) => flatpak_manager.build_terminal(),
         Some(Commands::ExportBundle) => flatpak_manager.export_bundle(),
-        Some(Commands::SelectManifest { .. })
-        | Some(Commands::Clean)
-        | Some(Commands::Completions { .. })
-        | Some(Commands::Stop) => unreachable!(),
+        Some(
+            Commands::SelectManifest { .. }
+            | Commands::Clean
+            | Commands::Completions { .. }
+            | Commands::Stop,
+        ) => unreachable!(),
     }
 }
 
@@ -204,7 +205,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         command => {
-            if let Err(error) = run(command) {
+            if let Err(error) = run(command.as_ref()) {
                 // Check if this was an intentional interruption (Ctrl+C)
                 if crate::command::is_interrupted_error(&error) {
                     eprintln!();

@@ -37,19 +37,19 @@ impl State {
         base_dir.join(STATE_DIR).join(STATE_FILE_NAME)
     }
 
-    pub fn load(base_dir: PathBuf) -> Result<Self> {
+    pub fn load(base_dir: &Path) -> Result<Self> {
         let base_dir = base_dir
             .canonicalize()
             .context("Failed to resolve state directory")?;
         let state_file = Self::state_file_path(&base_dir);
         if !state_file.exists() {
-            return Ok(State {
+            return Ok(Self {
                 base_dir,
                 ..Default::default()
             });
         }
         let content = fs::read_to_string(state_file)?;
-        let mut state: State = serde_json::from_str(&content)?;
+        let mut state: Self = serde_json::from_str(&content)?;
         state.base_dir = base_dir;
         Ok(state)
     }
@@ -64,7 +64,7 @@ impl State {
 
     /// Resets the state to its initial values.
     /// This is specifically only for build progress. Not general state.
-    pub fn reset(&mut self) {
+    pub const fn reset(&mut self) {
         self.dependencies_updated = false;
         self.dependencies_built = false;
         self.application_built = false;
@@ -81,7 +81,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let base_dir = temp_dir.path().to_path_buf();
 
-        let mut state = State::load(base_dir.clone()).unwrap();
+        let mut state = State::load(&base_dir).unwrap();
         assert_eq!(state.active_manifest, None);
         assert_eq!(state.manifest_hash, None);
         assert!(!state.dependencies_updated);
@@ -94,7 +94,7 @@ mod tests {
 
         state.save().unwrap();
 
-        let loaded_state = State::load(base_dir).unwrap();
+        let loaded_state = State::load(&base_dir).unwrap();
         assert_eq!(
             loaded_state.active_manifest,
             Some(PathBuf::from("/tmp/manifest.json"))
@@ -107,7 +107,7 @@ mod tests {
     #[test]
     fn test_state_reset() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let mut state = State::load(temp_dir.path().to_path_buf()).unwrap();
+        let mut state = State::load(temp_dir.path().as_ref()).unwrap();
 
         state.dependencies_updated = true;
         state.dependencies_built = true;

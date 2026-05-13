@@ -17,11 +17,12 @@ const LOCK_FILE_NAME: &str = "instance.lock";
 const TAKEOVER_WAIT: Duration = Duration::from_secs(5);
 const TAKEOVER_POLL: Duration = Duration::from_millis(100);
 
+#[allow(clippy::struct_field_names)]
 #[derive(Debug, Serialize, Deserialize)]
-struct InstanceMetadata {
-    process_id: u32,
-    process_group_id: u32,
-    process_start_time_ticks: u64,
+struct ProcessMetadata {
+    id: u32,
+    group_id: u32,
+    start_time_ticks: u64,
 }
 
 pub struct InstanceLock {
@@ -91,10 +92,10 @@ impl InstanceLock {
 
     fn write_current_metadata(&mut self, process_group_id: u32) -> Result<()> {
         let process_id = std::process::id();
-        let metadata = InstanceMetadata {
-            process_id,
-            process_group_id,
-            process_start_time_ticks: process_start_time_ticks(process_id)?,
+        let metadata = ProcessMetadata {
+            id: process_id,
+            group_id: process_group_id,
+            start_time_ticks: process_start_time_ticks(process_id)?,
         };
 
         let file = &mut *self.file;
@@ -117,23 +118,23 @@ impl Drop for InstanceLock {
 
 pub fn request_shutdown_from_lock(base_dir: &Path) -> Result<()> {
     let lock_file_path = lock_file_path(base_dir);
-    let Some(previous_instance) = read_metadata(&lock_file_path)? else {
+    let Some(previous_process) = read_metadata(&lock_file_path)? else {
         status_info("No running flatplay process found.");
         return Ok(());
     };
 
-    if !is_same_process_instance_running(&previous_instance) {
+    if !is_same_process_instance_running(&previous_process) {
         status_warn("No running flatplay process found (stale lock metadata). Cleaning up.");
         clear_lock_metadata(&lock_file_path)?;
         return Ok(());
     }
 
-    let process_group = Pid::from_raw(previous_instance.process_group_id as i32);
+    let process_group = Pid::from_raw(previous_process.group_id.cast_signed());
     match killpg(process_group, Signal::SIGTERM) {
-        Ok(_) => {
+        Ok(()) => {
             status_success(format!(
                 "Successfully stopped flatplay process group (PGID: {})",
-                previous_instance.process_group_id
+                previous_process.group_id
             ));
             Ok(())
         }
@@ -166,7 +167,7 @@ fn clear_lock_metadata(lock_file_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn read_metadata(lock_file_path: &Path) -> Result<Option<InstanceMetadata>> {
+fn read_metadata(lock_file_path: &Path) -> Result<Option<ProcessMetadata>> {
     if !lock_file_path.exists() {
         return Ok(None);
     }
@@ -189,12 +190,12 @@ fn read_metadata(lock_file_path: &Path) -> Result<Option<InstanceMetadata>> {
     }
 }
 
-fn is_same_process_instance_running(metadata: &InstanceMetadata) -> bool {
-    let Ok(current_start_time) = process_start_time_ticks(metadata.process_id) else {
+fn is_same_process_instance_running(current_process: &ProcessMetadata) -> bool {
+    let Ok(current_start_time) = process_start_time_ticks(current_process.id) else {
         return false;
     };
 
-    current_start_time == metadata.process_start_time_ticks
+    current_start_time == current_process.start_time_ticks
 }
 
 fn process_start_time_ticks(process_id: u32) -> Result<u64> {

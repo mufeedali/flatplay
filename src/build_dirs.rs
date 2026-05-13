@@ -7,7 +7,7 @@ pub struct BuildDirs {
 }
 
 impl BuildDirs {
-    pub fn new(base: PathBuf) -> Self {
+    pub const fn new(base: PathBuf) -> Self {
         Self { base }
     }
     pub fn build_dir(&self) -> PathBuf {

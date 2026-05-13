@@ -3,7 +3,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 pub fn is_valid_dbus_name(name: &str) -> bool {
@@ -51,6 +51,10 @@ pub enum Module {
         #[serde(default)]
         buildsystem: Option<String>,
         #[serde(default)]
+        builddir: Option<bool>,
+        #[serde(default)]
+        subdir: Option<String>,
+        #[serde(default)]
         config_opts: Option<Vec<String>>,
         #[serde(default)]
         build_commands: Option<Vec<String>>,
@@ -90,9 +94,9 @@ pub struct Manifest {
 impl Manifest {
     pub fn from_file(path: &Path) -> Result<Self> {
         let content = fs::read_to_string(path)?;
-        let manifest: Manifest = match path.extension().and_then(|s| s.to_str()) {
+        let manifest: Self = match path.extension().and_then(|s| s.to_str()) {
             Some("json") => serde_json::from_str(&content)?,
-            Some("yaml") | Some("yml") => serde_saphyr::from_str(&content)?,
+            Some("yaml" | "yml") => serde_saphyr::from_str(&content)?,
             _ => return Err(anyhow::anyhow!("Unsupported manifest format")),
         };
         if !is_valid_dbus_name(&manifest.id) {
@@ -120,7 +124,7 @@ impl Manifest {
             .config_opts
             .iter()
             .chain(module_config_opts.into_iter().flatten())
-            .map(|s| s.as_str())
+            .map(std::string::String::as_str)
             .collect()
     }
 
@@ -142,8 +146,8 @@ impl Manifest {
         let mpa = module_build_options.and_then(|b| b.append_path.as_deref());
         let mlp = module_build_options.and_then(|b| b.prepend_ld_library_path.as_deref());
         let mla = module_build_options.and_then(|b| b.append_ld_library_path.as_deref());
-        let mppc = module_build_options.and_then(|b| b.prepend_pkg_config_path.as_deref());
-        let mapc = module_build_options.and_then(|b| b.append_pkg_config_path.as_deref());
+        let m_prepend_pkg = module_build_options.and_then(|b| b.prepend_pkg_config_path.as_deref());
+        let m_append_pkg = module_build_options.and_then(|b| b.append_pkg_config_path.as_deref());
 
         if let Some(arg) = Self::build_path_override(
             "PATH",
@@ -176,14 +180,73 @@ impl Manifest {
                 "/usr/share/pkgconfig",
             ],
             self.build_options.prepend_pkg_config_path.as_deref(),
-            mppc,
+            m_prepend_pkg,
             self.build_options.append_pkg_config_path.as_deref(),
-            mapc,
+            m_append_pkg,
         ) {
             overrides.push(arg);
         }
 
         overrides
+    }
+
+    pub fn application_module(&self, manifest_path: &Path) -> Result<Module> {
+        match self.modules.last() {
+            Some(module @ Module::Object { .. }) => Ok(module.clone()),
+            Some(Module::Reference(ref_name)) => {
+                let parent = manifest_path
+                    .parent()
+                    .context("Manifest path has no parent directory")?;
+                let ref_path = parent.join(ref_name);
+                let modules = Self::load_module_file(&ref_path)?;
+                match modules.into_iter().last() {
+                    Some(module @ Module::Object { .. }) => Ok(module),
+                    Some(Module::Reference(name)) => Err(anyhow::anyhow!(
+                        "Nested module references not supported: {ref_name} -> {name}"
+                    )),
+                    None => Err(anyhow::anyhow!(
+                        "Referenced module file {ref_name} contains no modules"
+                    )),
+                }
+            }
+            None => Err(anyhow::anyhow!("Manifest has no modules")),
+        }
+    }
+
+    pub fn last_module_name(&self, manifest_path: &Path) -> Result<String> {
+        match self.modules.last() {
+            Some(Module::Object { name, .. }) => Ok(name.clone()),
+            Some(Module::Reference(ref_name)) => {
+                let parent = manifest_path
+                    .parent()
+                    .context("Manifest path has no parent directory")?;
+                let ref_path = parent.join(ref_name);
+                let modules = Self::load_module_file(&ref_path)?;
+                match modules.into_iter().last() {
+                    Some(Module::Object { name, .. }) => Ok(name),
+                    _ => Ok(ref_name.clone()),
+                }
+            }
+            None => Err(anyhow::anyhow!("Manifest has no modules")),
+        }
+    }
+
+    fn load_module_file(path: &Path) -> Result<Vec<Module>> {
+        let content = fs::read_to_string(path)?;
+        let modules: Vec<Module> = match path.extension().and_then(|s| s.to_str()) {
+            Some("json") => serde_json::from_str(&content)
+                .or_else(|_| serde_json::from_str::<Module>(&content).map(|m| vec![m]))
+                .map_err(|error| {
+                    anyhow::anyhow!("Failed to parse module file {}: {error}", path.display())
+                })?,
+            Some("yaml" | "yml") => serde_saphyr::from_str(&content)
+                .or_else(|_| serde_saphyr::from_str::<Module>(&content).map(|m| vec![m]))
+                .map_err(|error| {
+                    anyhow::anyhow!("Failed to parse module file {}: {error}", path.display())
+                })?,
+            _ => return Err(anyhow::anyhow!("Unsupported module file format")),
+        };
+        Ok(modules)
     }
 
     fn build_path_override(
@@ -212,53 +275,82 @@ impl Manifest {
 
 /// Recursively finds manifest files in the given path, optionally excluding a prefix subtree.
 /// Returns a sorted Vec of manifest file paths, prioritizing ".Devel." manifests and shallower paths.
-pub fn find_manifests_in_path(path: &Path, exclude_prefix: Option<&Path>) -> Result<Vec<PathBuf>> {
+pub fn find_manifests_in_path(path: &Path, exclude_prefix: Option<&Path>) -> Vec<PathBuf> {
     use walkdir::WalkDir;
 
     let mut manifests = vec![];
 
-    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let exclude_prefix =
-        exclude_prefix.map(|p| p.canonicalize().unwrap_or_else(|_| p.to_path_buf()));
+    let path = match path.canonicalize() {
+        Ok(canonical) => canonical,
+        Err(error) => {
+            crate::utils::verbose(format!(
+                "Failed to canonicalize path {}: {error}",
+                path.display()
+            ));
+            path.to_path_buf()
+        }
+    };
+    let exclude_prefix = exclude_prefix.map(|prefix| match prefix.canonicalize() {
+        Ok(canonical) => canonical,
+        Err(error) => {
+            crate::utils::verbose(format!(
+                "Failed to canonicalize exclude prefix {}: {error}",
+                prefix.display()
+            ));
+            prefix.to_path_buf()
+        }
+    });
 
-    for entry in WalkDir::new(&path)
-        .into_iter()
-        .filter_entry(|e| {
-            if e.depth() == 0 {
-                return true;
+    let walker = WalkDir::new(&path).into_iter().filter_entry(|entry| {
+        if entry.depth() == 0 {
+            return true;
+        }
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|s| s.starts_with('.'))
+        {
+            return false;
+        }
+        if let Some(prefix) = &exclude_prefix
+            && entry.path().starts_with(prefix)
+        {
+            return false;
+        }
+        true
+    });
+
+    for entry_result in walker {
+        let entry = match entry_result {
+            Ok(entry) => entry,
+            Err(error) => {
+                crate::utils::verbose(format!("Error scanning directory entry: {error}"));
+                continue;
             }
-            if e.file_name().to_str().is_some_and(|s| s.starts_with('.')) {
-                return false;
-            }
-            if let Some(prefix) = &exclude_prefix
-                && e.path().starts_with(prefix)
-            {
-                return false;
-            }
-            true
-        })
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
-        .filter(|e| {
-            matches!(
-                e.path().extension().and_then(|s| s.to_str()),
-                Some("json") | Some("yaml") | Some("yml")
-            )
-        })
-        .filter(|e| Manifest::from_file(e.path()).is_ok())
-    {
-        manifests.push(entry.into_path());
+        };
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        if !matches!(
+            entry.path().extension().and_then(|s| s.to_str()),
+            Some("json" | "yaml" | "yml")
+        ) {
+            continue;
+        }
+        if Manifest::from_file(entry.path()).is_ok() {
+            manifests.push(entry.into_path());
+        }
     }
 
     manifests.sort_by(|a, b| {
-        let a_is_devel = a.to_str().unwrap_or("").contains(".Devel.");
-        let b_is_devel = b.to_str().unwrap_or("").contains(".Devel.");
+        let a_is_devel = a.to_str().is_some_and(|s| s.contains(".Devel."));
+        let b_is_devel = b.to_str().is_some_and(|s| s.contains(".Devel."));
         b_is_devel
             .cmp(&a_is_devel)
             .then_with(|| a.components().count().cmp(&b.components().count()))
     });
 
-    Ok(manifests)
+    manifests
 }
 
 #[cfg(test)]

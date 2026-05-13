@@ -84,12 +84,25 @@ pub fn run_command(command: &str, args: &[&str], working_dir: Option<&Path>) -> 
     let status = command_process.wait()?;
 
     if !status.success() {
-        let code = status.code().unwrap_or(1);
         // Exit code 130 = 128 + SIGINT(2), standard for interrupted by Ctrl+C
-        if code == 130 || crate::is_interrupted() {
+        if status.code() == Some(130) || crate::is_interrupted() {
             return Err(InterruptedError.into());
         }
-        return Err(anyhow::anyhow!("Command failed with exit code: {}", code));
+        let code = status.code().map_or_else(
+            || {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::ExitStatusExt;
+                    format!("signal {}", status.signal().unwrap_or(0))
+                }
+                #[cfg(not(unix))]
+                {
+                    "unknown".to_string()
+                }
+            },
+            |code| code.to_string(),
+        );
+        return Err(anyhow::anyhow!("Command failed with exit code: {code}"));
     }
 
     Ok(())
