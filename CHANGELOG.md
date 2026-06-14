@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0](https://github.com/mufeedali/flatplay/compare/v0.7.0...v0.8.0) - 2026-06-14
+
+### Added
+
+- [**breaking**] archive support, some refactoring
+
+### Other
+
+- *(deps)* bump serde_json from 1.0.149 to 1.0.150 ([#77](https://github.com/mufeedali/flatplay/pull/77))
+- *(deps)* bump serde-saphyr from 0.0.26 to 0.0.27 ([#78](https://github.com/mufeedali/flatplay/pull/78))
+- *(deps)* bump tar from 0.4.45 to 0.4.46 ([#76](https://github.com/mufeedali/flatplay/pull/76))
+
 ## [0.7.0](https://github.com/mufeedali/flatplay/compare/v0.6.0...v0.7.0) - 2026-05-12
 
 ### Fixed
