@@ -274,10 +274,15 @@ pub fn path_to_str(path: &Path) -> Result<&str> {
 }
 
 pub fn download_file(url: &str, dest: &Path) -> Result<()> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create download directory {}", parent.display()))?;
+    }
     let response = ureq::get(url)
         .call()
         .map_err(|error| anyhow::anyhow!("Failed to download {url}: {error}"))?;
-    let mut file = std::fs::File::create(dest)?;
+    let mut file = std::fs::File::create(dest)
+        .with_context(|| format!("Failed to create download target {}", dest.display()))?;
     std::io::copy(&mut response.into_body().into_reader(), &mut file)?;
     Ok(())
 }
@@ -334,14 +339,30 @@ pub fn move_file(src: &Path, dest: &Path) -> Result<()> {
 
 /// Recursively copy a directory tree.
 pub fn copy_dir_all(src: &Path, dest: &Path) -> Result<()> {
+    copy_dir_all_excluding(src, dest, &[".flatplay"])
+}
+
+/// Recursively copy a directory tree, skipping path components listed in `exclude_names`
+/// (e.g. `.flatplay` to avoid copying the build dir into itself).
+pub fn copy_dir_all_excluding(src: &Path, dest: &Path, exclude_names: &[&str]) -> Result<()> {
     std::fs::create_dir_all(dest)
         .with_context(|| format!("Failed to create directory {}", dest.display()))?;
-    for entry in walkdir::WalkDir::new(src).min_depth(1) {
+    let walker = walkdir::WalkDir::new(src)
+        .min_depth(1)
+        .into_iter()
+        .filter_entry(|entry| {
+            let name = entry.file_name().to_string_lossy();
+            !exclude_names.iter().any(|ex| *ex == name)
+        });
+    for entry in walker {
         let entry = entry?;
         let rel = entry.path().strip_prefix(src)?;
         let dest_path = dest.join(rel);
         if entry.file_type().is_dir() {
             std::fs::create_dir_all(&dest_path)?;
+        } else if entry.file_type().is_symlink() {
+            // Skip broken/recursive symlinks.
+            continue;
         } else {
             if let Some(parent) = dest_path.parent() {
                 std::fs::create_dir_all(parent)?;

@@ -224,6 +224,9 @@ fn materialize_one(
                     .to_string()
             });
             let archive_path = cache.cached_path(&filename, sha256);
+            if let Some(parent) = archive_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
             if !archive_path.exists() {
                 if is_url {
                     status(format!("Downloading {module_name} from {location}"));
@@ -231,9 +234,6 @@ fn materialize_one(
                 } else {
                     let src = resolve_path(manifest_dir, location);
                     status(format!("Copying {module_name} from {}", src.display()));
-                    if let Some(parent) = archive_path.parent() {
-                        std::fs::create_dir_all(parent)?;
-                    }
                     std::fs::copy(&src, &archive_path)?;
                 }
                 verify_sha256_hex(&archive_path, sha256)?;
@@ -274,6 +274,9 @@ fn materialize_one(
 
             if let Some(expected) = sha256 {
                 let cached = cache.cached_path(&filename, expected);
+                if let Some(parent) = cached.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
                 if !cached.exists() {
                     if is_url {
                         status(format!("Downloading {module_name} from {location}"));
@@ -281,14 +284,14 @@ fn materialize_one(
                     } else {
                         let src = resolve_path(manifest_dir, location);
                         status(format!("Copying {module_name} from {}", src.display()));
-                        if let Some(parent) = cached.parent() {
-                            std::fs::create_dir_all(parent)?;
-                        }
                         std::fs::copy(&src, &cached)?;
                     }
                     verify_sha256_hex(&cached, expected)?;
                 }
                 if cached != dest_path {
+                    if let Some(parent) = dest_path.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
                     std::fs::copy(&cached, &dest_path)?;
                 }
             } else if is_url {

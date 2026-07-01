@@ -207,10 +207,13 @@ impl<'a> FlatpakManager<'a> {
     ) -> Result<()> {
         let mut filesystem_binds = vec![sandbox.fs_ws.clone(), sandbox.fs_repo.clone()];
         filesystem_binds.extend(extra_fs.iter().map(|s| (*s).to_string()));
-        filesystem_binds.extend(sandbox.path_overrides.iter().cloned());
 
         let mut env = Vec::new();
-        for arg in &sandbox.env_args {
+        for arg in sandbox
+            .env_args
+            .iter()
+            .chain(sandbox.path_overrides.iter())
+        {
             if let Some(rest) = arg.strip_prefix("--env=")
                 && let Some((k, v)) = rest.split_once('=')
             {

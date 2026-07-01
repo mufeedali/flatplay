@@ -72,21 +72,41 @@ impl BwrapRunner {
             ]);
         }
 
-        // /etc from the SDK when present; otherwise minimal host networking files.
+        // Writable tmpfs /etc so we can add host resolv.conf (cannot overlay files onto a
+        // read-only SDK /etc bind — bwrap fails with "Can't create file at /etc/resolv.conf").
+        args.extend(["--tmpfs".into(), "/etc".into()]);
         let sdk_etc = self.usr_files.join("etc");
         if sdk_etc.is_dir() {
-            args.extend([
-                "--ro-bind".into(),
-                path_to_str(&sdk_etc)?.into(),
-                "/etc".into(),
-            ]);
+            // Expose useful SDK etc trees (ssl certs, fonts, …). Skip dangling symlinks
+            // (e.g. mtab) via --ro-bind-try.
+            if let Ok(entries) = std::fs::read_dir(&sdk_etc) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let Some(name_str) = name.to_str() else {
+                        continue;
+                    };
+                    // Skip files we override from the host.
+                    if matches!(name_str, "resolv.conf" | "hosts" | "mtab") {
+                        continue;
+                    }
+                    let src = entry.path();
+                    // Path::exists follows symlinks; skip broken ones.
+                    if src.is_symlink() && !src.exists() {
+                        continue;
+                    }
+                    let dest = format!("/etc/{name_str}");
+                    args.extend([
+                        "--ro-bind-try".into(),
+                        path_to_str(&src)?.into(),
+                        dest,
+                    ]);
+                }
+            }
         }
         for host_file in ["/etc/resolv.conf", "/etc/hosts"] {
             if Path::new(host_file).exists() {
-                // Overlay on top of SDK /etc when possible; bwrap last bind wins for same dest
-                // only for exact paths — bind individual files.
                 args.extend([
-                    "--ro-bind".into(),
+                    "--ro-bind-try".into(),
                     host_file.into(),
                     host_file.into(),
                 ]);

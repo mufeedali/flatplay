@@ -75,54 +75,28 @@ pub fn build_dependencies(
 
         status(format!("Building module {name}..."));
         let typed = Source::from_values(sources)?;
-        let source_dir = if typed.iter().any(|s| matches!(s, Source::Dir { .. }))
-            && typed.iter().all(|s| matches!(s, Source::Dir { .. } | Source::File { .. }))
+        let source_dir = if let Some(dir_path) = sources::resolve_dir_source(&typed, manifest_dir)
         {
-            // Mix of dir + file: materialize into module dir (copies dir tree + files).
-            let source_dir = build_dir.join(name);
-            sources::materialize_sources(&typed, &source_dir, manifest_dir, &cache, name)?;
-            // For dir markers, prefer real dir path when only dirs.
-            if typed.iter().all(|s| matches!(s, Source::Dir { .. })) {
-                sources::resolve_dir_source(&typed, manifest_dir)
-                    .unwrap_or(source_dir)
-            } else {
-                // materialize copies dir into source_dir for mixed; use source_dir
-                // Re-materialize: our Dir handler may only write a marker. Force copy for deps.
-                let source_dir = build_dir.join(name);
-                if source_dir.exists() {
-                    std::fs::remove_dir_all(&source_dir)?;
-                }
-                std::fs::create_dir_all(&source_dir)?;
-                for source in &typed {
-                    match source {
-                        Source::Dir { path, dest, .. } => {
-                            let src = if Path::new(path).is_absolute() {
-                                PathBuf::from(path)
-                            } else {
-                                manifest_dir.join(path)
-                            };
-                            let target = match dest {
-                                Some(d) => source_dir.join(d),
-                                None => source_dir.clone(),
-                            };
-                            crate::utils::copy_dir_all(&src, &target)?;
-                        }
-                        other => {
-                            sources::materialize_sources(
-                                &[other.clone()],
-                                &source_dir,
-                                manifest_dir,
-                                &cache,
-                                name,
-                            )?;
-                        }
+            // Prefer the live project/dir tree (no recursive copy into .flatplay).
+            // Non-dir sources (files/archives) are materialized directly into that tree.
+            let non_dir: Vec<_> = typed
+                .iter()
+                .filter(|s| !matches!(s, Source::Dir { .. }))
+                .cloned()
+                .collect();
+            if !non_dir.is_empty() {
+                // Materialize into a temp module folder, then copy files to dir_path.
+                let staging = build_dir.join(format!("{name}-staging"));
+                sources::materialize_sources(&non_dir, &staging, manifest_dir, &cache, name)?;
+                for entry in std::fs::read_dir(&staging)? {
+                    let entry = entry?;
+                    let dest = dir_path.join(entry.file_name());
+                    if entry.file_type()?.is_file() {
+                        std::fs::copy(entry.path(), &dest)?;
                     }
                 }
-                source_dir
             }
-        } else if typed.iter().all(|s| matches!(s, Source::Dir { .. })) {
-            sources::resolve_dir_source(&typed, manifest_dir)
-                .context("dir source missing")?
+            dir_path
         } else {
             let source_dir = build_dir.join(name);
             if !source_dir.exists() {
@@ -203,8 +177,7 @@ pub fn build_dependencies(
         if let Some(post_install) = post_install {
             for command in post_install {
                 let processed = substitute_vars(command, &manifest.id, name, num_cpus);
-                let argv = shell_words::split(&processed)
-                    .with_context(|| format!("Bad post-install: {processed}"))?;
+                let argv = command_to_argv(&processed)?;
                 run_argv(
                     runner,
                     repo_dir,
@@ -249,12 +222,20 @@ fn run_argv(
     if let Some(cwd) = cwd {
         filesystem_binds.push(format!("--filesystem={}", path_to_str(cwd)?));
     }
-    filesystem_binds.extend(path_overrides.iter().cloned());
+
+    let mut env = env_pairs.to_vec();
+    for override_arg in path_overrides {
+        if let Some(rest) = override_arg.strip_prefix("--env=")
+            && let Some((key, value)) = rest.split_once('=')
+        {
+            env.push((key.to_string(), value.to_string()));
+        }
+    }
 
     runner.run(&RunSpec {
         repo_dir: repo_dir.to_path_buf(),
         argv: argv.to_vec(),
-        env: env_pairs.to_vec(),
+        env,
         filesystem_binds,
         extra_args: vec![],
         share_network: true,
@@ -416,8 +397,7 @@ fn build_simple(
             // flatpak-builder uses ${PWD} as the module build directory.
             .replace("${PWD}", path_to_str(&source_canon)?)
             .replace("$PWD", path_to_str(&source_canon)?);
-        let argv = shell_words::split(&processed)
-            .with_context(|| format!("Bad build-command: {processed}"))?;
+        let argv = command_to_argv(&processed)?;
         run_argv(
             runner,
             repo_dir,
@@ -429,6 +409,25 @@ fn build_simple(
         )?;
     }
     Ok(())
+}
+
+/// flatpak-builder runs build-commands through a shell; use `/bin/sh -c` when needed.
+fn command_to_argv(command: &str) -> Result<Vec<String>> {
+    let needs_shell = command.contains('$')
+        || command.contains('`')
+        || command.contains("&&")
+        || command.contains("||")
+        || command.contains(';')
+        || command.contains('|')
+        || command.contains('>')
+        || command.contains('<')
+        || command.contains('(')
+        || command.contains(')');
+    if needs_shell {
+        Ok(vec!["/bin/sh".into(), "-c".into(), command.to_string()])
+    } else {
+        shell_words::split(command).with_context(|| format!("Bad build-command: {command}"))
+    }
 }
 
 fn build_autotools(
