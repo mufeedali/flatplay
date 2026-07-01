@@ -113,6 +113,8 @@ impl BwrapRunner {
             }
         }
 
+        // Mirror the environment Flatpak injects so apps find data under /app/share
+        // (e.g. GLib.get_system_data_dirs() → wordbook/wn-*.db.zst).
         args.extend([
             "--bind".into(),
             path_to_str(&files)?.into(),
@@ -129,6 +131,18 @@ impl BwrapRunner {
             "--setenv".into(),
             "PKG_CONFIG_PATH".into(),
             "/app/lib/pkgconfig:/app/share/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig".into(),
+            "--setenv".into(),
+            "XDG_DATA_DIRS".into(),
+            "/app/share:/usr/share:/usr/share/runtime/share".into(),
+            "--setenv".into(),
+            "XDG_CONFIG_DIRS".into(),
+            "/app/etc/xdg:/etc/xdg".into(),
+            "--setenv".into(),
+            "GI_TYPELIB_PATH".into(),
+            "/app/lib/girepository-1.0".into(),
+            "--setenv".into(),
+            "GSETTINGS_SCHEMA_DIR".into(),
+            "/app/share/glib-2.0/schemas".into(),
             "--setenv".into(),
             "FLATPAK_ID".into(),
             self.app_id.clone(),

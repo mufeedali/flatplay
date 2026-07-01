@@ -467,8 +467,8 @@ impl<'a> FlatpakManager<'a> {
     }
 
     fn parse_command_line(command: &str) -> Result<Vec<String>> {
-        shell_words::split(command)
-            .with_context(|| format!("Failed to parse command line: {command}"))
+        // Match flatpak-builder: post-install / simple commands run under a shell.
+        Ok(vec!["/bin/sh".into(), "-c".into(), command.to_string()])
     }
 
     fn substitute_vars(

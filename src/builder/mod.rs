@@ -411,23 +411,9 @@ fn build_simple(
     Ok(())
 }
 
-/// flatpak-builder runs build-commands through a shell; use `/bin/sh -c` when needed.
+/// flatpak-builder always runs `build-commands` / `post-install` through a shell.
 fn command_to_argv(command: &str) -> Result<Vec<String>> {
-    let needs_shell = command.contains('$')
-        || command.contains('`')
-        || command.contains("&&")
-        || command.contains("||")
-        || command.contains(';')
-        || command.contains('|')
-        || command.contains('>')
-        || command.contains('<')
-        || command.contains('(')
-        || command.contains(')');
-    if needs_shell {
-        Ok(vec!["/bin/sh".into(), "-c".into(), command.to_string()])
-    } else {
-        shell_words::split(command).with_context(|| format!("Bad build-command: {command}"))
-    }
+    Ok(vec!["/bin/sh".into(), "-c".into(), command.to_string()])
 }
 
 fn build_autotools(
