@@ -108,19 +108,4 @@ pub fn run_command(command: &str, args: &[&str], working_dir: Option<&Path>) -> 
     Ok(())
 }
 
-// Runs flatpak-builder, preferring the native binary, then the Flatpak app.
-pub fn flatpak_builder(args: &[&str], working_dir: Option<&Path>) -> Result<()> {
-    if command_succeeds("flatpak-builder", &["--version"]) {
-        verbose("Using native flatpak-builder");
-        run_command("flatpak-builder", args, working_dir)
-    } else if command_succeeds("flatpak", &["run", "org.flatpak.Builder", "--version"]) {
-        verbose("Using org.flatpak.Builder via flatpak run");
-        let mut new_args = vec!["run", "org.flatpak.Builder"];
-        new_args.extend_from_slice(args);
-        run_command("flatpak", &new_args, working_dir)
-    } else {
-        Err(anyhow::anyhow!(
-            "Flatpak builder not found. Please install either `flatpak-builder` from your distro repositories or `org.flatpak.Builder` through `flatpak install`."
-        ))
-    }
-}
+// Legacy helper removed: dependency builds are in-process (see `builder` + `sandbox::BwrapRunner`).
