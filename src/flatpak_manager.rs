@@ -9,13 +9,14 @@ use dialoguer::{Select, theme::SimpleTheme};
 use nix::unistd::geteuid;
 
 use crate::build_dirs::BuildDirs;
-use crate::command::{flatpak_builder, run_command};
+use crate::builder;
 use crate::manifest::{BuildOptions, Manifest, Module, find_manifests_in_path};
+use crate::sandbox::{self, BwrapRunner, RunSpec, SandboxRunner, ensure_sdk_and_runtime};
+use crate::sources::{self, DownloadCache, Source};
 use crate::state::State;
 use crate::utils::{
-    build_font_config, download_file, extract_archive, get_a11y_bus_args, get_fonts_args,
-    get_host_env, guess_archive_type, path_to_str, status, status_info, status_success,
-    status_warn, verbose, verify_sha256_hex, version_less_than,
+    build_font_config, copy_dir_all, get_a11y_bus_args, get_fonts_args, get_host_env, path_to_str,
+    status, status_info, status_success, status_warn, verbose,
 };
 
 use sha2::{Digest, Sha256};
@@ -54,16 +55,49 @@ impl<'a> FlatpakManager<'a> {
         manifest.last_module_name(manifest_path)
     }
     fn compute_manifest_hash(path: &Path) -> Result<String> {
-        let content = fs::read(path)?;
         let mut hasher = Sha256::new();
-        hasher.update(&content);
+        Self::hash_file_into(&mut hasher, path)?;
+        // Include referenced module files and source fingerprints so edits invalidate state.
+        if let Ok(manifest) = Manifest::from_file(path) {
+            let parent = path.parent().unwrap_or_else(|| Path::new("."));
+            for module in &manifest.modules {
+                match module {
+                    Module::Reference(name) => {
+                        let ref_path = parent.join(name);
+                        if ref_path.is_file() {
+                            Self::hash_file_into(&mut hasher, &ref_path)?;
+                        }
+                    }
+                    Module::Object { sources, name, .. } => {
+                        hasher.update(name.as_bytes());
+                        if let Ok(typed) = Source::from_values(sources) {
+                            hasher.update(sources::sources_fingerprint(&typed).as_bytes());
+                        }
+                    }
+                }
+            }
+        }
         let result = hasher.finalize();
-
         let mut hash = String::with_capacity(64);
         for b in result {
             write!(&mut hash, "{b:02x}")?;
         }
         Ok(hash)
+    }
+
+    fn hash_file_into(hasher: &mut Sha256, path: &Path) -> Result<()> {
+        use std::io::Read;
+        let mut file = fs::File::open(path)
+            .with_context(|| format!("Failed to open {} for hashing", path.display()))?;
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let read = file.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+        Ok(())
     }
 
     fn find_manifests(&self) -> Result<Vec<PathBuf>> {
@@ -138,32 +172,64 @@ impl<'a> FlatpakManager<'a> {
     }
 
     fn check_required_version(manifest: &Manifest) -> Result<()> {
-        let required = manifest.finish_args.iter().find_map(|arg| {
+        // Without the flatpak CLI we only ensure the SDK/runtime trees exist.
+        if let Some(required) = manifest.finish_args.iter().find_map(|arg| {
             let (key, value) = arg.split_once('=')?;
-            if key == "--require-version" {
-                Some(value)
-            } else {
-                None
-            }
-        });
-        if let Some(required) = required {
-            let version = String::from_utf8_lossy(
-                &std::process::Command::new("flatpak")
-                    .arg("--version")
-                    .output()
-                    .context("Failed to get flatpak version")?
-                    .stdout,
-            )
-            .replace("Flatpak ", "")
-            .trim()
-            .to_string();
-            if version_less_than(&version, required) {
-                return Err(anyhow::anyhow!(
-                    "Manifest requires flatpak >= {required} but {version} is installed"
-                ));
-            }
+            (key == "--require-version").then_some(value)
+        }) {
+            verbose(format!(
+                "Manifest requests flatpak >= {required}; skipping CLI version probe (no flatpak CLI dependency)"
+            ));
         }
         Ok(())
+    }
+
+    fn bwrap_runner(&self) -> Result<BwrapRunner> {
+        let manifest = self.manifest.as_ref().context("No manifest available")?;
+        let (sdk, _runtime) =
+            ensure_sdk_and_runtime(&manifest.sdk, &manifest.runtime, &manifest.runtime_version)?;
+        Ok(BwrapRunner::for_sdk(
+            &sdk,
+            manifest.id.clone(),
+            self.state.base_dir.as_path(),
+        ))
+    }
+
+    fn run_sandboxed(
+        &self,
+        runner: &BwrapRunner,
+        sandbox: &BuildSandbox,
+        repo_dir: &Path,
+        argv: &[String],
+        extra_fs: &[&str],
+        share_network: bool,
+        cwd: Option<&Path>,
+    ) -> Result<()> {
+        let mut filesystem_binds = vec![sandbox.fs_ws.clone(), sandbox.fs_repo.clone()];
+        filesystem_binds.extend(extra_fs.iter().map(|s| (*s).to_string()));
+
+        let mut env = Vec::new();
+        for arg in sandbox
+            .env_args
+            .iter()
+            .chain(sandbox.path_overrides.iter())
+        {
+            if let Some(rest) = arg.strip_prefix("--env=")
+                && let Some((k, v)) = rest.split_once('=')
+            {
+                env.push((k.to_string(), v.to_string()));
+            }
+        }
+
+        runner.run(&RunSpec {
+            repo_dir: repo_dir.to_path_buf(),
+            argv: argv.to_vec(),
+            env,
+            filesystem_binds,
+            extra_args: vec![],
+            share_network,
+            cwd: cwd.map(Path::to_path_buf),
+        })
     }
 
     pub fn validate_manifest(&self, allow_auto_select: bool) -> Result<()> {
@@ -241,38 +307,24 @@ impl<'a> FlatpakManager<'a> {
         metadata_file.is_file() && files_dir.is_dir() && var_dir.is_dir()
     }
 
-    fn init_build(&self) -> Result<()> {
-        let manifest = self.manifest.as_ref().context("No manifest available")?;
-        let repo_dir = self.build_dirs.repo_dir();
-
-        status(format!("{}", "Initializing build environment...".bold()));
-        run_command(
-            "flatpak",
-            &[
-                "build-init",
-                path_to_str(&repo_dir)?,
-                &manifest.id,
-                &manifest.sdk,
-                &manifest.runtime,
-                &manifest.runtime_version,
-            ],
-            Some(self.state.base_dir.as_path()),
-        )
-    }
-
     fn init(&self) -> Result<()> {
         if self.is_build_initialized() {
             return Ok(());
         }
-
-        self.init_build()?;
-        Ok(())
+        let manifest = self.manifest.as_ref().context("No manifest available")?;
+        let repo_dir = self.build_dirs.repo_dir();
+        sandbox::ensure_build_initialized(
+            &repo_dir,
+            &manifest.id,
+            &manifest.sdk,
+            &manifest.runtime,
+            &manifest.runtime_version,
+            Some(self.state.base_dir.as_path()),
+        )
     }
 
     fn build_application(&self, rebuild: bool) -> Result<()> {
         let manifest = self.manifest.as_ref().context("No manifest available")?;
-        let repo_dir = self.build_dirs.repo_dir();
-        let repo_dir_str = path_to_str(&repo_dir)?;
 
         self.download_application_sources()?;
 
@@ -296,14 +348,20 @@ impl<'a> FlatpakManager<'a> {
         let module_bo = module_build_options.as_ref();
         let num_cpus = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
 
+        let runner = self.bwrap_runner()?;
+        let repo_dir = self.build_dirs.repo_dir();
+
         match buildsystem.as_deref() {
-            Some("meson") => self.run_meson(repo_dir_str, rebuild, &merged_config, module_bo)?,
+            Some("meson") => {
+                self.run_meson(&runner, &repo_dir, rebuild, &merged_config, module_bo)?;
+            }
             Some("cmake" | "cmake-ninja") => {
-                self.run_cmake(repo_dir_str, rebuild, &merged_config, module_bo)?;
+                self.run_cmake(&runner, &repo_dir, rebuild, &merged_config, module_bo)?;
             }
             Some("simple") => self.run_simple(
+                &runner,
+                &repo_dir,
                 manifest,
-                repo_dir_str,
                 build_commands.as_ref(),
                 module_bo,
                 &name,
@@ -312,14 +370,21 @@ impl<'a> FlatpakManager<'a> {
             Some("qmake") => {
                 return Err(anyhow::anyhow!("qmake build system is not supported"));
             }
-            _ => self.run_autotools(repo_dir_str, rebuild, &merged_config, module_bo, num_cpus)?,
+            _ => self.run_autotools(
+                &runner,
+                &repo_dir,
+                rebuild,
+                &merged_config,
+                module_bo,
+                num_cpus,
+            )?,
         }
         if let Some(post_install) = post_install {
             let sandbox = self.build_sandbox(module_bo, manifest);
             for command in &post_install {
                 let processed = Self::substitute_vars(command, &manifest.id, &name, num_cpus);
-                let args = Self::build_command(&sandbox, repo_dir_str, &processed, &[], &[]);
-                run_command("flatpak", &args, Some(self.state.base_dir.as_path()))?;
+                let argv = Self::parse_command_line(&processed)?;
+                self.run_sandboxed(&runner, &sandbox, &repo_dir, &argv, &[], true, None)?;
             }
         }
 
@@ -333,214 +398,26 @@ impl<'a> FlatpakManager<'a> {
                 "Application module is not a defined module"
             ));
         };
-        let source_dir = self.build_dirs.build_dir().join(&name);
-
-        if source_dir.exists() {
-            fs::remove_dir_all(&source_dir)?;
+        let typed = Source::from_values(&sources)?;
+        // Pure `dir` sources are resolved at build time (no copy into .flatplay).
+        if typed.iter().all(|s| matches!(s, Source::Dir { .. })) {
+            verbose(format!(
+                "Application module {name} uses directory sources only; skipping materialize"
+            ));
+            return Ok(());
         }
 
-        for source in &sources {
-            let Some(source_type) = source.get("type").and_then(|v| v.as_str()) else {
-                return Err(anyhow::anyhow!(
-                    "Source in module '{name}' is missing a type field"
-                ));
-            };
-            match source_type {
-                "git" => self.handle_git_source(source, &name, &source_dir)?,
-                "dir" => verbose(format!("Using local directory source for {name}")),
-                "archive" => self.handle_archive_source(source, &name, &source_dir)?,
-                "file" => self.handle_file_source(source, &name, &source_dir)?,
-                other => {
-                    return Err(anyhow::anyhow!(
-                        "Source type '{other}' in module '{name}' is not yet supported"
-                    ));
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn handle_git_source(
-        &self,
-        source: &serde_json::Value,
-        name: &str,
-        source_dir: &Path,
-    ) -> Result<()> {
-        let url = source
-            .get("url")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Git source in module '{name}' must specify url"))?;
-        let tag = source.get("tag").and_then(|v| v.as_str());
-        let commit = source.get("commit").and_then(|v| v.as_str());
-        let branch = source.get("branch").and_then(|v| v.as_str());
-
-        match (commit, tag, branch) {
-            (Some(commit), _, _) => {
-                status(format!("Cloning {name} from {url} (commit {commit})"));
-                run_command(
-                    "git",
-                    &[
-                        "clone",
-                        "--recurse-submodules",
-                        url,
-                        path_to_str(source_dir)?,
-                    ],
-                    Some(self.state.base_dir.as_path()),
-                )?;
-                run_command(
-                    "git",
-                    &["-C", path_to_str(source_dir)?, "checkout", commit],
-                    Some(self.state.base_dir.as_path()),
-                )?;
-            }
-            (None, Some(tag), _) => {
-                status(format!("Cloning {name} from {url} (tag {tag})"));
-                run_command(
-                    "git",
-                    &[
-                        "clone",
-                        "--recurse-submodules",
-                        "--branch",
-                        tag,
-                        "--depth",
-                        "1",
-                        url,
-                        path_to_str(source_dir)?,
-                    ],
-                    Some(self.state.base_dir.as_path()),
-                )?;
-            }
-            (None, None, Some(branch)) => {
-                status(format!("Cloning {name} from {url} (branch {branch})"));
-                run_command(
-                    "git",
-                    &[
-                        "clone",
-                        "--recurse-submodules",
-                        "--branch",
-                        branch,
-                        "--depth",
-                        "1",
-                        url,
-                        path_to_str(source_dir)?,
-                    ],
-                    Some(self.state.base_dir.as_path()),
-                )?;
-            }
-            (None, None, None) => {
-                return Err(anyhow::anyhow!(
-                    "Git source in module '{name}' must specify one of: tag, commit, branch"
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    fn handle_archive_source(
-        &self,
-        source: &serde_json::Value,
-        name: &str,
-        source_dir: &Path,
-    ) -> Result<()> {
-        let is_url = source.get("url").and_then(|v| v.as_str()).is_some();
-        let url = source
-            .get("url")
-            .and_then(|v| v.as_str())
-            .or_else(|| source.get("path").and_then(|v| v.as_str()))
-            .ok_or_else(|| {
-                anyhow::anyhow!("Archive source in module '{name}' must specify url or path")
-            })?;
-        let sha256 = source
-            .get("sha256")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                anyhow::anyhow!("Archive source in module '{name}' must specify sha256")
-            })?;
-        let strip = source
-            .get("strip-components")
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|v| usize::try_from(v).ok())
-            .unwrap_or(1);
-        let archive_type = source
-            .get("archive-type")
-            .and_then(|v| v.as_str())
-            .map_or_else(|| guess_archive_type(url), ToString::to_string);
-        let filename = source
-            .get("dest-filename")
-            .and_then(|v| v.as_str())
-            .map_or_else(
-                || {
-                    Path::new(url)
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("archive")
-                        .to_string()
-                },
-                ToString::to_string,
-            );
-        let archive_path = self.build_dirs.build_dir().join(&filename);
-
-        if is_url {
-            status(format!("Downloading {name} from {url}"));
-            download_file(url, &archive_path)?;
-        } else {
-            status(format!("Copying {name} from {url}"));
-            fs::copy(url, &archive_path)?;
-        }
-        verify_sha256_hex(&archive_path, sha256)?;
-        extract_archive(&archive_path, &archive_type, source_dir, strip)?;
-        fs::remove_file(&archive_path).ok();
-        Ok(())
-    }
-
-    fn handle_file_source(
-        &self,
-        source: &serde_json::Value,
-        name: &str,
-        source_dir: &Path,
-    ) -> Result<()> {
-        let url = source
-            .get("url")
-            .and_then(|v| v.as_str())
-            .or_else(|| source.get("path").and_then(|v| v.as_str()))
-            .ok_or_else(|| {
-                anyhow::anyhow!("File source in module '{name}' must specify url or path")
-            })?;
-        let filename = source
-            .get("dest-filename")
-            .and_then(|v| v.as_str())
-            .map_or_else(
-                || {
-                    Path::new(url)
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("file")
-                        .to_string()
-                },
-                ToString::to_string,
-            );
-
-        if let Some(expected) = source.get("sha256").and_then(|v| v.as_str()) {
-            let is_url = source.get("url").and_then(|v| v.as_str()).is_some();
-            let temp_path = self.build_dirs.build_dir().join(&filename);
-            if is_url {
-                status(format!("Downloading {name} from {url}"));
-                download_file(url, &temp_path)?;
-            } else {
-                status(format!("Copying {name} from {url}"));
-                fs::copy(url, &temp_path)?;
-            }
-            verify_sha256_hex(&temp_path, expected)?;
-            let dest_path = source_dir.join(&filename);
-            if let Some(parent) = dest_path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            fs::rename(&temp_path, &dest_path)?;
-        } else {
-            status(format!("Copying {name} from {url}"));
-            fs::copy(url, source_dir.join(&filename))?;
-        }
-        Ok(())
+        let manifest_path = self
+            .state
+            .active_manifest
+            .as_ref()
+            .context("No active manifest")?;
+        let manifest_dir = manifest_path
+            .parent()
+            .context("Manifest path has no parent directory")?;
+        let source_dir = self.build_dirs.module_source_dir(&name);
+        let cache = DownloadCache::new(&self.build_dirs.build_dir());
+        sources::materialize_sources(&typed, &source_dir, manifest_dir, &cache, &name)
     }
 
     fn build_sandbox(
@@ -574,18 +451,24 @@ impl<'a> FlatpakManager<'a> {
         args
     }
 
+    /// Build a `flatpak build …` argv. `command_argv` is a pre-split command (use
+    /// [`Self::parse_command_line`] for manifest `build-commands` / `post-install`).
     fn build_command<'s>(
         sandbox: &'s BuildSandbox,
         repo_dir_str: &'s str,
-        command: &'s str,
+        command_argv: &'s [String],
         extra_fs: &'s [&'s str],
         extra_args: &'s [&'s str],
     ) -> Vec<&'s str> {
         let mut args = Self::sandbox_args(sandbox, repo_dir_str, extra_fs);
-        let split: Vec<&str> = command.split_whitespace().collect();
-        args.extend(&split);
+        args.extend(command_argv.iter().map(String::as_str));
         args.extend_from_slice(extra_args);
         args
+    }
+
+    fn parse_command_line(command: &str) -> Result<Vec<String>> {
+        // Match flatpak-builder: post-install / simple commands run under a shell.
+        Ok(vec!["/bin/sh".into(), "-c".into(), command.to_string()])
     }
 
     fn substitute_vars(
@@ -607,7 +490,8 @@ impl<'a> FlatpakManager<'a> {
 
     fn run_meson(
         &self,
-        repo_dir_str: &str,
+        runner: &BwrapRunner,
+        repo_dir: &Path,
         rebuild: bool,
         config_opts: &[&str],
         module_build_options: Option<&BuildOptions>,
@@ -625,66 +509,71 @@ impl<'a> FlatpakManager<'a> {
                 "Application module is not a defined module"
             ));
         };
-        let source_dir = {
-            let base = if let Some(source) = sources.first() {
-                if let (Some("dir"), Some(path)) = (
-                    source.get("type").and_then(|v| v.as_str()),
-                    source.get("path").and_then(|v| v.as_str()),
-                ) {
-                    let manifest_path = self
-                        .state
-                        .active_manifest
-                        .as_ref()
-                        .context("No active manifest")?;
-                    let manifest_dir = manifest_path
-                        .parent()
-                        .context("Manifest path has no parent directory")?;
-                    manifest_dir.join(path)
-                } else {
-                    self.build_dirs.build_dir().join(&name)
-                }
-            } else {
-                self.build_dirs.build_dir().join(&name)
-            };
-            if let Some(subdir) = &subdir {
-                base.join(subdir)
-            } else {
-                base
-            }
-        };
-        let source_dir = source_dir
-            .canonicalize()
-            .context("Source directory not found")?;
+        let source_dir = self.resolve_module_source_dir(&name, &sources, subdir.as_deref())?;
         let source_dir_str = path_to_str(&source_dir)?;
         let build_dir = self.build_dirs.build_system_dir();
+        std::fs::create_dir_all(&build_dir)?;
         let build_dir_str = path_to_str(&build_dir)?;
         let sandbox = self.build_sandbox(module_build_options, manifest);
         let fs_builddir = format!("--filesystem={build_dir_str}");
         let extra_fs = [fs_builddir.as_str()];
 
         if !rebuild {
-            let mut args = Self::sandbox_args(&sandbox, repo_dir_str, &extra_fs);
-            args.extend(&["meson", "setup"]);
-            args.extend_from_slice(config_opts);
-            args.extend(&["--prefix=/app", source_dir_str, build_dir_str]);
-            run_command("flatpak", &args, Some(self.state.base_dir.as_path()))?;
+            let mut setup: Vec<String> = vec!["meson".into(), "setup".into()];
+            setup.extend(config_opts.iter().map(|s| (*s).to_string()));
+            setup.extend([
+                "--prefix=/app".into(),
+                source_dir_str.into(),
+                build_dir_str.into(),
+            ]);
+            self.run_sandboxed(runner, &sandbox, repo_dir, &setup, &extra_fs, true, None)?;
         }
 
-        {
-            let ninja_cmd = format!("ninja -C {build_dir_str}");
-            let args = Self::build_command(&sandbox, repo_dir_str, &ninja_cmd, &extra_fs, &[]);
-            run_command("flatpak", &args, Some(self.state.base_dir.as_path()))?;
-        }
-        {
-            let install_cmd = format!("meson install -C {build_dir_str}");
-            let args = Self::build_command(&sandbox, repo_dir_str, &install_cmd, &extra_fs, &[]);
-            run_command("flatpak", &args, Some(self.state.base_dir.as_path()))
-        }
+        let ninja_cmd = vec![
+            "ninja".to_string(),
+            "-C".to_string(),
+            build_dir_str.to_string(),
+        ];
+        self.run_sandboxed(runner, &sandbox, repo_dir, &ninja_cmd, &extra_fs, true, None)?;
+        let install_cmd = vec![
+            "meson".to_string(),
+            "install".to_string(),
+            "-C".to_string(),
+            build_dir_str.to_string(),
+        ];
+        self.run_sandboxed(runner, &sandbox, repo_dir, &install_cmd, &extra_fs, true, None)
+    }
+
+    fn resolve_module_source_dir(
+        &self,
+        name: &str,
+        sources: &[serde_json::Value],
+        subdir: Option<&str>,
+    ) -> Result<PathBuf> {
+        let manifest_path = self
+            .state
+            .active_manifest
+            .as_ref()
+            .context("No active manifest")?;
+        let manifest_dir = manifest_path
+            .parent()
+            .context("Manifest path has no parent directory")?;
+        let typed = Source::from_values(sources).unwrap_or_else(|_| vec![]);
+        let base = sources::resolve_dir_source(&typed, manifest_dir)
+            .unwrap_or_else(|| self.build_dirs.module_source_dir(name));
+        let path = if let Some(subdir) = subdir {
+            base.join(subdir)
+        } else {
+            base
+        };
+        path.canonicalize()
+            .with_context(|| format!("Source directory not found: {}", path.display()))
     }
 
     fn run_cmake(
         &self,
-        repo_dir_str: &str,
+        runner: &BwrapRunner,
+        repo_dir: &Path,
         rebuild: bool,
         config_opts: &[&str],
         module_build_options: Option<&BuildOptions>,
@@ -702,35 +591,7 @@ impl<'a> FlatpakManager<'a> {
                 "Application module is not a defined module"
             ));
         };
-        let source_dir = {
-            let base = if let Some(source) = sources.first() {
-                if let (Some("dir"), Some(path)) = (
-                    source.get("type").and_then(|v| v.as_str()),
-                    source.get("path").and_then(|v| v.as_str()),
-                ) {
-                    let manifest_path = self
-                        .state
-                        .active_manifest
-                        .as_ref()
-                        .context("No active manifest")?;
-                    let manifest_dir = manifest_path
-                        .parent()
-                        .context("Manifest path has no parent directory")?;
-                    manifest_dir.join(path)
-                } else {
-                    self.build_dirs.build_dir().join(&name)
-                }
-            } else {
-                self.build_dirs.build_dir().join(&name)
-            };
-            if let Some(subdir) = &subdir {
-                base.join(subdir)
-            } else {
-                base
-            }
-        }
-        .canonicalize()
-        .context("Source directory not found")?;
+        let source_dir = self.resolve_module_source_dir(&name, &sources, subdir.as_deref())?;
         let source_dir_str = path_to_str(&source_dir)?;
         let build_dir = self.build_dirs.build_system_dir();
         let build_dir_str = path_to_str(&build_dir)?;
@@ -739,35 +600,40 @@ impl<'a> FlatpakManager<'a> {
         let extra_fs = [fs_builddir.as_str()];
 
         if !rebuild {
-            let b_flag = format!("-B{build_dir_str}");
-            let mut args = Self::sandbox_args(&sandbox, repo_dir_str, &extra_fs);
-            args.extend(&["cmake", "-G", "Ninja", &b_flag]);
-            args.extend(&[
-                "-DCMAKE_EXPORT_COMPILE_COMMANDS=1",
-                "-DCMAKE_BUILD_TYPE=RelWithDebInfo",
-                "-DCMAKE_INSTALL_PREFIX=/app",
-            ]);
-            args.extend_from_slice(config_opts);
-            args.push(source_dir_str);
-            run_command("flatpak", &args, Some(self.state.base_dir.as_path()))?;
+            let mut configure = vec![
+                "cmake".into(),
+                "-G".into(),
+                "Ninja".into(),
+                format!("-B{build_dir_str}"),
+                "-DCMAKE_EXPORT_COMPILE_COMMANDS=1".into(),
+                "-DCMAKE_BUILD_TYPE=RelWithDebInfo".into(),
+                "-DCMAKE_INSTALL_PREFIX=/app".into(),
+            ];
+            configure.extend(config_opts.iter().map(|s| (*s).to_string()));
+            configure.push(source_dir_str.to_string());
+            self.run_sandboxed(runner, &sandbox, repo_dir, &configure, &extra_fs, true, None)?;
         }
 
-        {
-            let ninja_cmd = format!("ninja -C {build_dir_str}");
-            let args = Self::build_command(&sandbox, repo_dir_str, &ninja_cmd, &extra_fs, &[]);
-            run_command("flatpak", &args, Some(self.state.base_dir.as_path()))?;
-        }
-        {
-            let install_cmd = format!("ninja -C {build_dir_str} install");
-            let args = Self::build_command(&sandbox, repo_dir_str, &install_cmd, &extra_fs, &[]);
-            run_command("flatpak", &args, Some(self.state.base_dir.as_path()))
-        }
+        let ninja_cmd = vec![
+            "ninja".to_string(),
+            "-C".to_string(),
+            build_dir_str.to_string(),
+        ];
+        self.run_sandboxed(runner, &sandbox, repo_dir, &ninja_cmd, &extra_fs, true, None)?;
+        let install_cmd = vec![
+            "ninja".to_string(),
+            "-C".to_string(),
+            build_dir_str.to_string(),
+            "install".to_string(),
+        ];
+        self.run_sandboxed(runner, &sandbox, repo_dir, &install_cmd, &extra_fs, true, None)
     }
 
     fn run_simple(
         &self,
+        runner: &BwrapRunner,
+        repo_dir: &Path,
         manifest: &Manifest,
-        repo_dir_str: &str,
         build_commands: Option<&Vec<String>>,
         module_build_options: Option<&BuildOptions>,
         module_name: &str,
@@ -777,8 +643,8 @@ impl<'a> FlatpakManager<'a> {
             let sandbox = self.build_sandbox(module_build_options, manifest);
             for command in commands {
                 let processed = Self::substitute_vars(command, &manifest.id, module_name, num_cpus);
-                let args = Self::build_command(&sandbox, repo_dir_str, &processed, &[], &[]);
-                run_command("flatpak", &args, Some(self.state.base_dir.as_path()))?;
+                let argv = Self::parse_command_line(&processed)?;
+                self.run_sandboxed(runner, &sandbox, repo_dir, &argv, &[], true, None)?;
             }
         }
         Ok(())
@@ -786,7 +652,8 @@ impl<'a> FlatpakManager<'a> {
 
     fn run_autotools(
         &self,
-        repo_dir_str: &str,
+        runner: &BwrapRunner,
+        repo_dir: &Path,
         rebuild: bool,
         config_opts: &[&str],
         module_build_options: Option<&BuildOptions>,
@@ -818,35 +685,43 @@ impl<'a> FlatpakManager<'a> {
         let sandbox = self.build_sandbox(module_build_options, manifest);
         let source_dir_str = path_to_str(&source_dir)?;
 
+        let make_argv = |jobs_flag: &str| {
+            vec![
+                "make".to_string(),
+                "V=0".to_string(),
+                jobs_flag.to_string(),
+                "install".to_string(),
+            ]
+        };
+
         match (rebuild, use_builddir) {
             (false, true) => {
-                let mut args = Self::sandbox_args(&sandbox, repo_dir_str, &[]);
-                let configure_path = format!("{source_dir_str}/configure");
-                args.extend(&[&configure_path, "--prefix=/app"]);
-                args.extend_from_slice(config_opts);
-                run_command("flatpak", &args, Some(self.state.base_dir.as_path()))?;
+                let mut configure = vec![
+                    format!("{source_dir_str}/configure"),
+                    "--prefix=/app".into(),
+                ];
+                configure.extend(config_opts.iter().map(|s| (*s).to_string()));
+                self.run_sandboxed(runner, &sandbox, repo_dir, &configure, &[], true, None)?;
 
                 let build_dir = self.build_dirs.build_system_dir();
                 let build_dir_str = path_to_str(&build_dir)?;
                 let fs_builddir = format!("--filesystem={build_dir_str}");
                 let extra_fs = [fs_builddir.as_str()];
                 let jobs_flag = format!("-j{num_cpus}");
-                let make_args = ["V=0", jobs_flag.as_str(), "install"];
-                let args =
-                    Self::build_command(&sandbox, repo_dir_str, "make", &extra_fs, &make_args);
-                run_command("flatpak", &args, Some(self.state.base_dir.as_path()))
+                let make_cmd = make_argv(&jobs_flag);
+                self.run_sandboxed(runner, &sandbox, repo_dir, &make_cmd, &extra_fs, true, None)
             }
             (false, false) => {
-                let mut args = Self::sandbox_args(&sandbox, repo_dir_str, &[]);
-                let configure_path = format!("{source_dir_str}/configure");
-                args.extend(&[&configure_path, "--prefix=/app"]);
-                args.extend_from_slice(config_opts);
-                run_command("flatpak", &args, Some(self.state.base_dir.as_path()))?;
+                let mut configure = vec![
+                    format!("{source_dir_str}/configure"),
+                    "--prefix=/app".into(),
+                ];
+                configure.extend(config_opts.iter().map(|s| (*s).to_string()));
+                self.run_sandboxed(runner, &sandbox, repo_dir, &configure, &[], true, None)?;
 
                 let jobs_flag = format!("-j{num_cpus}");
-                let make_args = ["V=0", jobs_flag.as_str(), "install"];
-                let args = Self::build_command(&sandbox, repo_dir_str, "make", &[], &make_args);
-                run_command("flatpak", &args, Some(self.state.base_dir.as_path()))
+                let make_cmd = make_argv(&jobs_flag);
+                self.run_sandboxed(runner, &sandbox, repo_dir, &make_cmd, &[], true, None)
             }
             (true, true) => {
                 let build_dir = self.build_dirs.build_system_dir();
@@ -854,73 +729,53 @@ impl<'a> FlatpakManager<'a> {
                 let fs_builddir = format!("--filesystem={build_dir_str}");
                 let extra_fs = [fs_builddir.as_str()];
                 let jobs_flag = format!("-j{num_cpus}");
-                let make_args = ["V=0", jobs_flag.as_str(), "install"];
-                let args =
-                    Self::build_command(&sandbox, repo_dir_str, "make", &extra_fs, &make_args);
-                run_command("flatpak", &args, Some(self.state.base_dir.as_path()))
+                let make_cmd = make_argv(&jobs_flag);
+                self.run_sandboxed(runner, &sandbox, repo_dir, &make_cmd, &extra_fs, true, None)
             }
             (true, false) => {
                 let jobs_flag = format!("-j{num_cpus}");
-                let make_args = ["V=0", jobs_flag.as_str(), "install"];
-                let args = Self::build_command(&sandbox, repo_dir_str, "make", &[], &make_args);
-                run_command("flatpak", &args, Some(self.state.base_dir.as_path()))
+                let make_cmd = make_argv(&jobs_flag);
+                self.run_sandboxed(runner, &sandbox, repo_dir, &make_cmd, &[], true, None)
             }
         }
     }
 
     fn build_dependencies(&mut self) -> Result<()> {
-        status(format!("{}", "Building dependencies...".bold()));
         let manifest_path = self
             .state
             .active_manifest
             .as_ref()
-            .context("No active manifest")?;
+            .context("No active manifest")?
+            .clone();
+        let manifest = self.manifest.as_ref().context("No manifest available")?;
         let repo_dir = self.build_dirs.repo_dir();
-        let state_dir = self.build_dirs.flatpak_builder_dir();
+        let build_dir = self.build_dirs.build_dir();
         let stop_at = self.last_module_name()?;
-        flatpak_builder(
-            &[
-                "--ccache",
-                "--force-clean",
-                "--disable-updates",
-                "--disable-download",
-                "--build-only",
-                "--keep-build-dirs",
-                &format!("--state-dir={}", path_to_str(&state_dir)?),
-                &format!("--stop-at={stop_at}"),
-                path_to_str(&repo_dir)?,
-                path_to_str(manifest_path)?,
-            ],
-            Some(self.state.base_dir.as_path()),
+        let runner = self.bwrap_runner()?;
+        builder::build_dependencies(
+            manifest,
+            &manifest_path,
+            &repo_dir,
+            &build_dir,
+            &stop_at,
+            self.state.base_dir.as_path(),
+            &runner,
         )?;
         self.state.dependencies_built = true;
         self.state.save()
     }
 
     pub fn update_dependencies(&mut self) -> Result<()> {
-        status(format!("{}", "Updating dependencies...".bold()));
-
         let manifest_path = self
             .state
             .active_manifest
             .as_ref()
-            .context("No active manifest")?;
-        let repo_dir = self.build_dirs.repo_dir();
-        let state_dir = self.build_dirs.flatpak_builder_dir();
+            .context("No active manifest")?
+            .clone();
+        let manifest = self.manifest.as_ref().context("No manifest available")?;
+        let build_dir = self.build_dirs.build_dir();
         let stop_at = self.last_module_name()?;
-        flatpak_builder(
-            &[
-                "--ccache",
-                "--force-clean",
-                "--disable-updates",
-                "--download-only",
-                &format!("--state-dir={}", path_to_str(&state_dir)?),
-                &format!("--stop-at={stop_at}"),
-                path_to_str(&repo_dir)?,
-                path_to_str(manifest_path)?,
-            ],
-            Some(self.state.base_dir.as_path()),
-        )?;
+        builder::update_dependencies(manifest, &manifest_path, &build_dir, &stop_at)?;
         self.state.dependencies_updated = true;
         self.state.save()
     }
@@ -1033,16 +888,63 @@ impl<'a> FlatpakManager<'a> {
         }
         let manifest = self.manifest.as_ref().context("No manifest available")?;
         let repo_dir = self.build_dirs.repo_dir();
-        let sandbox = self.build_sandbox(None, manifest);
-
-        let mut args = Self::sandbox_run_args(manifest, &repo_dir, &sandbox, false)?;
-        args.push(manifest.command.clone());
+        let runner = self.bwrap_runner()?;
+        let mut argv = vec![manifest.command.clone()];
         if let Some(x_run_args) = &manifest.x_run_args {
-            args.extend(x_run_args.clone());
+            argv.extend(x_run_args.clone());
+        }
+        self.run_app_spec(&runner, &repo_dir, manifest, argv, false)
+    }
+
+    fn run_app_spec(
+        &self,
+        runner: &BwrapRunner,
+        repo_dir: &Path,
+        manifest: &Manifest,
+        argv: Vec<String>,
+        with_dev_paths: bool,
+    ) -> Result<()> {
+        let sandbox = self.build_sandbox(None, manifest);
+        let mut filesystem_binds = vec![sandbox.fs_ws.clone(), sandbox.fs_repo.clone()];
+        filesystem_binds.extend(manifest.finish_args_filtered());
+        if with_dev_paths {
+            filesystem_binds.extend(sandbox.path_overrides.clone());
         }
 
-        let args_str: Vec<&str> = args.iter().map(String::as_str).collect();
-        run_command("flatpak", &args_str, Some(self.state.base_dir.as_path()))
+        let mut env = Vec::new();
+        for (k, v) in get_host_env() {
+            env.push((k, v));
+        }
+        for arg in &sandbox.env_args {
+            if let Some(rest) = arg.strip_prefix("--env=")
+                && let Some((k, v)) = rest.split_once('=')
+            {
+                env.push((k.to_string(), v.to_string()));
+            }
+        }
+
+        match get_a11y_bus_args() {
+            Ok(a11y_args) => filesystem_binds.extend(a11y_args),
+            Err(error) => verbose(format!("a11y bus not available: {error:#}")),
+        }
+        match build_font_config().and_then(|config_path| get_fonts_args(&config_path)) {
+            Ok(fonts_args) => filesystem_binds.extend(fonts_args),
+            Err(error) => verbose(format!("fonts not available: {error:#}")),
+        }
+
+        runner.run(&RunSpec {
+            repo_dir: repo_dir.to_path_buf(),
+            argv,
+            env,
+            filesystem_binds,
+            extra_args: vec![],
+            share_network: with_dev_paths
+                || manifest
+                    .finish_args
+                    .iter()
+                    .any(|a| a.contains("share=network")),
+            cwd: None,
+        })
     }
 
     pub fn export_bundle(&self) -> Result<()> {
@@ -1054,59 +956,47 @@ impl<'a> FlatpakManager<'a> {
         let manifest = self.manifest.as_ref().context("No manifest available")?;
         let repo_dir = self.build_dirs.repo_dir();
         let finalized_repo_dir = self.build_dirs.finalized_repo_dir();
-        let ostree_dir = self.build_dirs.ostree_dir();
 
-        // Remove finalized repo
         if finalized_repo_dir.is_dir() {
             fs::remove_dir_all(&finalized_repo_dir)?;
         }
+        copy_dir_all(&repo_dir, &finalized_repo_dir)?;
 
-        run_command(
-            "cp",
-            &[
-                "-r",
-                path_to_str(&repo_dir)?,
-                path_to_str(&finalized_repo_dir)?,
-            ],
-            Some(self.state.base_dir.as_path()),
-        )?;
+        // Write finish metadata without the flatpak CLI.
+        let meta_path = finalized_repo_dir.join("metadata");
+        let mut meta = fs::read_to_string(&meta_path).unwrap_or_default();
+        if !meta.contains("[Context]") {
+            use std::fmt::Write as _;
+            let _ = writeln!(meta, "\n[Context]");
+            for arg in manifest.finish_args_filtered() {
+                let _ = writeln!(meta, "# finish-arg: {arg}");
+            }
+            let _ = writeln!(meta, "\n[Application]");
+            let _ = writeln!(meta, "command={}", manifest.command);
+            fs::write(&meta_path, meta)?;
+        }
 
-        // Finalize build
-        let mut args: Vec<String> = vec!["build-finish".to_string()];
+        let bundle_name = format!("{}-files.tar", manifest.id);
+        let bundle_path = self.state.base_dir.join(&bundle_name);
+        let files = finalized_repo_dir.join("files");
+        // Portable "bundle": tar of /app files (not an OSTree .flatpak; no flatpak CLI).
+        let status = std::process::Command::new("tar")
+            .args([
+                "-cf",
+                path_to_str(&bundle_path)?,
+                "-C",
+                path_to_str(&files)?,
+                ".",
+            ])
+            .status()
+            .context("Failed to spawn tar for export (host tar is used only for packaging)")?;
+        if !status.success() {
+            anyhow::bail!("tar export failed with {status}");
+        }
 
-        args.extend(manifest.finish_args_filtered());
-        args.push(format!("--command={}", manifest.command));
-        args.push(path_to_str(&finalized_repo_dir)?.to_string());
-
-        let args_str: Vec<&str> = args.iter().map(String::as_str).collect();
-
-        run_command("flatpak", &args_str, Some(self.state.base_dir.as_path()))?;
-
-        // Export build
-        run_command(
-            "flatpak",
-            &[
-                "build-export",
-                path_to_str(&ostree_dir)?,
-                path_to_str(&finalized_repo_dir)?,
-            ],
-            Some(self.state.base_dir.as_path()),
-        )?;
-
-        // Bundle build
-        let bundle_name = format!("{}.flatpak", manifest.id);
-        run_command(
-            "flatpak",
-            &[
-                "build-bundle",
-                path_to_str(&ostree_dir)?,
-                &bundle_name,
-                manifest.id.as_str(),
-            ],
-            Some(self.state.base_dir.as_path()),
-        )?;
-
-        status_success(format!("Exported {bundle_name}"));
+        status_success(format!(
+            "Exported {bundle_name} (files tree; install-time OSTree bundles need a separate ostree toolchain)"
+        ));
         Ok(())
     }
 
@@ -1122,24 +1012,17 @@ impl<'a> FlatpakManager<'a> {
 
     pub fn runtime_terminal(&self) -> Result<()> {
         let manifest = self.manifest.as_ref().context("No manifest available")?;
-        let sdk_id = format!("{}//{}", manifest.sdk, manifest.runtime_version);
-        run_command(
-            "flatpak",
-            &["run", "--command=bash", &sdk_id],
-            Some(self.state.base_dir.as_path()),
-        )
+        let repo_dir = self.build_dirs.repo_dir();
+        // Empty app tree is fine; drop into SDK with bash.
+        let runner = self.bwrap_runner()?;
+        self.run_app_spec(&runner, &repo_dir, manifest, vec!["bash".into()], true)
     }
 
     pub fn build_terminal(&self) -> Result<()> {
         let manifest = self.manifest.as_ref().context("No manifest available")?;
         let repo_dir = self.build_dirs.repo_dir();
-        let sandbox = self.build_sandbox(None, manifest);
-
-        let mut args = Self::sandbox_run_args(manifest, &repo_dir, &sandbox, true)?;
-        args.push("bash".to_string());
-
-        let args_str: Vec<&str> = args.iter().map(String::as_str).collect();
-        run_command("flatpak", &args_str, Some(self.state.base_dir.as_path()))
+        let runner = self.bwrap_runner()?;
+        self.run_app_spec(&runner, &repo_dir, manifest, vec!["bash".into()], true)
     }
 
     pub fn select_manifest(&mut self, path: Option<PathBuf>) -> Result<()> {

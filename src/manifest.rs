@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -257,11 +256,11 @@ impl Manifest {
         manifest_append: Option<&str>,
         module_append: Option<&str>,
     ) -> Option<String> {
-        let host_value = env::var(var).ok();
+        // Do not inject host PATH/LD_LIBRARY_PATH/PKG_CONFIG_PATH into the sandbox;
+        // host libraries cause subtle link failures inside the SDK.
         let parts: Vec<&str> = manifest_prepend
             .into_iter()
             .chain(module_prepend)
-            .chain(host_value.as_deref())
             .chain(defaults.iter().copied())
             .chain(manifest_append)
             .chain(module_append)
@@ -301,15 +300,30 @@ pub fn find_manifests_in_path(path: &Path, exclude_prefix: Option<&Path>) -> Vec
         }
     });
 
+    const SKIP_DIRS: &[&str] = &[
+        "node_modules",
+        "target",
+        "vendor",
+        "_build",
+        "build",
+        "dist",
+        ".flatplay",
+        "__pycache__",
+        ".venv",
+        "venv",
+        ".tox",
+        ".git",
+    ];
+
     let walker = WalkDir::new(&path).into_iter().filter_entry(|entry| {
         if entry.depth() == 0 {
             return true;
         }
-        if entry
-            .file_name()
-            .to_str()
-            .is_some_and(|s| s.starts_with('.'))
-        {
+        let name = entry.file_name().to_string_lossy();
+        if name.starts_with('.') {
+            return false;
+        }
+        if entry.file_type().is_dir() && SKIP_DIRS.iter().any(|d| *d == name) {
             return false;
         }
         if let Some(prefix) = &exclude_prefix

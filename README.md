@@ -6,12 +6,17 @@ Note that this is a **work in progress** and you might encounter issues along th
 
 ## External Dependencies
 
-Flatplay relies on the following external commands to be available on your system:
+Flatplay’s **control plane does not invoke** the `flatpak` or `flatpak-builder` CLIs.
 
-- `git`
-- `gdbus`
-- `flatpak`
-- `flatpak-builder`
+| Need | How |
+|------|-----|
+| Sandbox | **bubblewrap** (`bwrap`) on PATH |
+| SDK / runtime **content** | Installed on disk under `~/.local/share/flatpak` or `/var/lib/flatpak` (e.g. via GNOME Software). Flatplay only *reads* those trees. |
+| Git sources | **libgit2** (linked), not host `git` |
+| A11y bus | **zbus** (optional `gdbus` fallback) |
+| Toolchains (meson, ninja, gcc, …) | Inside the Flatpak **SDK** image |
+
+Architecture: typed sources + download cache, in-process module builder, `BwrapRunner` sandbox.
 
 ## Installation & Usage
 

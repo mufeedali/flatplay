@@ -119,6 +119,48 @@ fn parse_a11y_address(address: &str) -> Result<(String, String)> {
 }
 
 pub fn get_a11y_bus_args() -> Result<Vec<String>> {
+    let address = query_a11y_bus_address()?;
+    let (unix_path, suffix) = parse_a11y_address(&address)?;
+
+    Ok(vec![
+        format!("--bind-mount=/run/flatpak/at-spi-bus={}", unix_path),
+        if suffix.is_empty() {
+            "--env=AT_SPI_BUS_ADDRESS=unix:path=/run/flatpak/at-spi-bus".to_string()
+        } else {
+            format!("--env=AT_SPI_BUS_ADDRESS=unix:path=/run/flatpak/at-spi-bus{suffix}")
+        },
+    ])
+}
+
+fn query_a11y_bus_address() -> Result<String> {
+    // Prefer in-process D-Bus (no `gdbus` CLI). Fall back to gdbus if zbus fails
+    // (e.g. missing session bus in odd environments).
+    match query_a11y_bus_address_zbus() {
+        Ok(address) => Ok(address),
+        Err(zbus_error) => {
+            verbose(format!("zbus a11y query failed ({zbus_error:#}); trying gdbus"));
+            query_a11y_bus_address_gdbus()
+        }
+    }
+}
+
+fn query_a11y_bus_address_zbus() -> Result<String> {
+    let conn = zbus::blocking::Connection::session()
+        .context("Failed to connect to session bus for a11y")?;
+    let proxy = zbus::blocking::Proxy::new(
+        &conn,
+        "org.a11y.Bus",
+        "/org/a11y/bus",
+        "org.a11y.Bus",
+    )
+    .context("Failed to create a11y bus proxy")?;
+    let address: String = proxy
+        .call("GetAddress", &())
+        .context("org.a11y.Bus.GetAddress failed")?;
+    Ok(address)
+}
+
+fn query_a11y_bus_address_gdbus() -> Result<String> {
     let output = Command::new("gdbus")
         .args([
             "call",
@@ -134,17 +176,7 @@ pub fn get_a11y_bus_args() -> Result<Vec<String>> {
         anyhow::bail!("gdbus a11y bus query failed with status: {}", output.status);
     }
 
-    let address = String::from_utf8_lossy(&output.stdout);
-    let (unix_path, suffix) = parse_a11y_address(&address)?;
-
-    Ok(vec![
-        format!("--bind-mount=/run/flatpak/at-spi-bus={}", unix_path),
-        if suffix.is_empty() {
-            "--env=AT_SPI_BUS_ADDRESS=unix:path=/run/flatpak/at-spi-bus".to_string()
-        } else {
-            format!("--env=AT_SPI_BUS_ADDRESS=unix:path=/run/flatpak/at-spi-bus{suffix}")
-        },
-    ])
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 fn path_exists(path: &str) -> bool {
@@ -242,18 +274,35 @@ pub fn path_to_str(path: &Path) -> Result<&str> {
 }
 
 pub fn download_file(url: &str, dest: &Path) -> Result<()> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create download directory {}", parent.display()))?;
+    }
     let response = ureq::get(url)
         .call()
         .map_err(|error| anyhow::anyhow!("Failed to download {url}: {error}"))?;
-    let mut file = std::fs::File::create(dest)?;
+    let mut file = std::fs::File::create(dest)
+        .with_context(|| format!("Failed to create download target {}", dest.display()))?;
     std::io::copy(&mut response.into_body().into_reader(), &mut file)?;
     Ok(())
 }
 
 pub fn verify_sha256_hex(path: &Path, expected: &str) -> Result<()> {
-    let content = std::fs::read(path)?;
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("Failed to open {} for hashing", path.display()))?;
     let mut hasher = Sha256::new();
-    hasher.update(&content);
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("Failed to read {} for hashing", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
     let result = hasher.finalize();
     let mut hash = String::with_capacity(64);
     for byte in result {
@@ -264,6 +313,68 @@ pub fn verify_sha256_hex(path: &Path, expected: &str) -> Result<()> {
             "SHA256 mismatch for {}: expected {expected}, got {hash}",
             path.display()
         ));
+    }
+    Ok(())
+}
+
+/// Move a file, falling back to copy+remove when rename fails across devices (EXDEV).
+pub fn move_file(src: &Path, dest: &Path) -> Result<()> {
+    match std::fs::rename(src, dest) {
+        Ok(()) => Ok(()),
+        Err(error)
+            if error.raw_os_error() == Some(18) /* EXDEV on Linux */
+                || error.kind() == std::io::ErrorKind::CrossesDevices =>
+        {
+            std::fs::copy(src, dest).with_context(|| {
+                format!("Failed to copy {} -> {}", src.display(), dest.display())
+            })?;
+            std::fs::remove_file(src).ok();
+            Ok(())
+        }
+        Err(error) => Err(error).with_context(|| {
+            format!("Failed to move {} -> {}", src.display(), dest.display())
+        }),
+    }
+}
+
+/// Recursively copy a directory tree.
+pub fn copy_dir_all(src: &Path, dest: &Path) -> Result<()> {
+    copy_dir_all_excluding(src, dest, &[".flatplay"])
+}
+
+/// Recursively copy a directory tree, skipping path components listed in `exclude_names`
+/// (e.g. `.flatplay` to avoid copying the build dir into itself).
+pub fn copy_dir_all_excluding(src: &Path, dest: &Path, exclude_names: &[&str]) -> Result<()> {
+    std::fs::create_dir_all(dest)
+        .with_context(|| format!("Failed to create directory {}", dest.display()))?;
+    let walker = walkdir::WalkDir::new(src)
+        .min_depth(1)
+        .into_iter()
+        .filter_entry(|entry| {
+            let name = entry.file_name().to_string_lossy();
+            !exclude_names.iter().any(|ex| *ex == name)
+        });
+    for entry in walker {
+        let entry = entry?;
+        let rel = entry.path().strip_prefix(src)?;
+        let dest_path = dest.join(rel);
+        if entry.file_type().is_dir() {
+            std::fs::create_dir_all(&dest_path)?;
+        } else if entry.file_type().is_symlink() {
+            // Skip broken/recursive symlinks.
+            continue;
+        } else {
+            if let Some(parent) = dest_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(entry.path(), &dest_path).with_context(|| {
+                format!(
+                    "Failed to copy {} -> {}",
+                    entry.path().display(),
+                    dest_path.display()
+                )
+            })?;
+        }
     }
     Ok(())
 }
@@ -312,7 +423,7 @@ pub fn extract_archive(
             if let Some(parent) = dest_path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::rename(entry.path(), &dest_path)?;
+            move_file(entry.path(), &dest_path)?;
         }
     }
 
@@ -520,5 +631,38 @@ mod tests {
 
         assert!(download_file(&url, &archive_path).is_err());
         mock.assert();
+    }
+
+    #[test]
+    fn test_copy_dir_all() {
+        let src = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let nested = src.path().join("a/b");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("file.txt"), b"hello").unwrap();
+
+        let dest_root = dest.path().join("copy");
+        copy_dir_all(src.path(), &dest_root).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dest_root.join("a/b/file.txt")).unwrap(),
+            "hello"
+        );
+    }
+
+    #[test]
+    fn test_move_file_same_fs() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.bin");
+        let dest = dir.path().join("dest.bin");
+        std::fs::write(&src, b"data").unwrap();
+        move_file(&src, &dest).unwrap();
+        assert!(!src.exists());
+        assert_eq!(std::fs::read(&dest).unwrap(), b"data");
+    }
+
+    #[test]
+    fn test_shell_words_roundtrip_quotes() {
+        let argv = shell_words::split(r#"echo "hello world" '--flag=a b'"#).unwrap();
+        assert_eq!(argv, ["echo", "hello world", "--flag=a b"]);
     }
 }

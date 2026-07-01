@@ -6,10 +6,14 @@ use std::process::{Command, ExitCode, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 mod build_dirs;
+mod builder;
 mod command;
 mod flatpak_manager;
+mod git_source;
 mod instance_lock;
 mod manifest;
+mod sandbox;
+mod sources;
 mod state;
 mod utils;
 
@@ -70,54 +74,41 @@ enum Commands {
     },
 }
 
+/// Resolve the project base directory by walking parents for a `.git` entry.
+/// Falls back to the current working directory (no `git` binary required).
 fn get_base_dir() -> anyhow::Result<PathBuf> {
-    let output = Command::new("git")
-        .arg("rev-parse")
-        .arg("--show-toplevel")
-        .output();
-
-    let raw = if let Ok(output) = output
-        && output.status.success()
-    {
-        PathBuf::from(String::from_utf8_lossy(&output.stdout).trim())
-    } else {
-        verbose("Not in a git repository, using current directory as base");
-        PathBuf::from(".")
-    };
-    raw.canonicalize()
+    let cwd = std::env::current_dir().context("Failed to get current directory")?;
+    let mut dir = cwd.as_path();
+    loop {
+        let git_entry = dir.join(".git");
+        if git_entry.exists() {
+            return dir
+                .canonicalize()
+                .context("Failed to resolve base directory");
+        }
+        match dir.parent() {
+            Some(parent) => dir = parent,
+            None => break,
+        }
+    }
+    verbose("Not in a git repository, using current directory as base");
+    cwd.canonicalize()
         .context("Failed to resolve base directory")
 }
 
 fn check_dependencies() -> anyhow::Result<()> {
-    let required = [("git", "git"), ("flatpak", "flatpak")];
+    // Control plane: bubblewrap only. Flatpak *runtimes/SDKs* must exist on disk
+    // (user/system install tree); we never invoke the `flatpak` or `flatpak-builder` CLIs.
     let mut missing = Vec::new();
 
-    for (cmd, name) in &required {
-        if Command::new(cmd)
-            .arg("--version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_err()
-        {
-            missing.push(*name);
-        }
-    }
-
-    if Command::new("flatpak-builder")
+    if Command::new("bwrap")
         .arg("--version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
         .is_err()
-        && Command::new("flatpak")
-            .args(["run", "org.flatpak.Builder", "--version"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_err()
     {
-        missing.push("flatpak-builder or org.flatpak.Builder");
+        missing.push("bubblewrap (bwrap)");
     }
 
     if !missing.is_empty() {

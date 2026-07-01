@@ -28,6 +28,12 @@ impl BuildDirs {
     pub fn ostree_dir(&self) -> PathBuf {
         self.build_dir().join("ostree")
     }
+    pub fn cache_dir(&self) -> PathBuf {
+        self.build_dir().join("cache")
+    }
+    pub fn module_source_dir(&self, module_name: &str) -> PathBuf {
+        self.build_dir().join(module_name)
+    }
     pub fn metadata_file(&self) -> PathBuf {
         self.repo_dir().join("metadata")
     }
@@ -60,6 +66,11 @@ mod tests {
             base.join(".flatplay/finalized-repo")
         );
         assert_eq!(dirs.ostree_dir(), base.join(".flatplay/ostree"));
+        assert_eq!(dirs.cache_dir(), base.join(".flatplay/cache"));
+        assert_eq!(
+            dirs.module_source_dir("app"),
+            base.join(".flatplay/app")
+        );
         assert_eq!(dirs.metadata_file(), base.join(".flatplay/repo/metadata"));
         assert_eq!(dirs.files_dir(), base.join(".flatplay/repo/files"));
         assert_eq!(dirs.var_dir(), base.join(".flatplay/repo/var"));

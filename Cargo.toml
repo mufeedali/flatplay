@@ -31,6 +31,10 @@ flate2 = "1"
 xz2 = "0.1"
 zip = "8"
 tempfile = "3"
+shell-words = "1.1"
+zbus = "5"
+# libgit2-backed; avoids requiring a host `git` binary on PATH
+git2 = "0.20"
 
 [dev-dependencies]
 mockito = "1"
