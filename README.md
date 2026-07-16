@@ -6,17 +6,23 @@ Note that this is a **work in progress** and you might encounter issues along th
 
 ## External Dependencies
 
-Flatplay’s **control plane does not invoke** the `flatpak` or `flatpak-builder` CLIs.
+Flatplay uses the **`flatpak` CLI** for sandboxing and lifecycle (`build-init`, `build`, `build-finish`, export). It does **not** invoke **`flatpak-builder`** — modules and sources are handled in-process.
 
 | Need | How |
 |------|-----|
-| Sandbox | **bubblewrap** (`bwrap`) on PATH |
-| SDK / runtime **content** | Installed on disk under `~/.local/share/flatpak` or `/var/lib/flatpak` (e.g. via GNOME Software). Flatplay only *reads* those trees. |
+| Sandbox / lifecycle | **`flatpak`** on PATH |
+| SDK / runtime | Installed via Flatpak (e.g. `flatpak install org.gnome.Sdk//…`) |
 | Git sources | **libgit2** (linked), not host `git` |
 | A11y bus | **zbus** (optional `gdbus` fallback) |
 | Toolchains (meson, ninja, gcc, …) | Inside the Flatpak **SDK** image |
 
-Architecture: typed sources + download cache, in-process module builder, `BwrapRunner` sandbox.
+Architecture: typed sources + download cache, **one** in-process module builder for deps and app, `FlatpakRunner` (`flatpak build`).
+
+### Notes / limitations
+
+- Manifest discovery scans the project tree (skips heavy dirs like `node_modules` / `target`) with a cheap text prefilter before full parse.
+- `sdk-extensions` and `cleanup` are parsed but not fully applied yet.
+- Host font remapping uses the usual FHS / XDG locations Flatpak expects.
 
 ## Installation & Usage
 
