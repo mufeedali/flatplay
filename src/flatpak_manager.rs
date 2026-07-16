@@ -209,11 +209,7 @@ impl<'a> FlatpakManager<'a> {
         filesystem_binds.extend(extra_fs.iter().map(|s| (*s).to_string()));
 
         let mut env = Vec::new();
-        for arg in sandbox
-            .env_args
-            .iter()
-            .chain(sandbox.path_overrides.iter())
-        {
+        for arg in sandbox.env_args.iter().chain(sandbox.path_overrides.iter()) {
             if let Some(rest) = arg.strip_prefix("--env=")
                 && let Some((k, v)) = rest.split_once('=')
             {
@@ -534,14 +530,24 @@ impl<'a> FlatpakManager<'a> {
             "-C".to_string(),
             build_dir_str.to_string(),
         ];
-        self.run_sandboxed(runner, &sandbox, repo_dir, &ninja_cmd, &extra_fs, true, None)?;
+        self.run_sandboxed(
+            runner, &sandbox, repo_dir, &ninja_cmd, &extra_fs, true, None,
+        )?;
         let install_cmd = vec![
             "meson".to_string(),
             "install".to_string(),
             "-C".to_string(),
             build_dir_str.to_string(),
         ];
-        self.run_sandboxed(runner, &sandbox, repo_dir, &install_cmd, &extra_fs, true, None)
+        self.run_sandboxed(
+            runner,
+            &sandbox,
+            repo_dir,
+            &install_cmd,
+            &extra_fs,
+            true,
+            None,
+        )
     }
 
     fn resolve_module_source_dir(
@@ -611,7 +617,9 @@ impl<'a> FlatpakManager<'a> {
             ];
             configure.extend(config_opts.iter().map(|s| (*s).to_string()));
             configure.push(source_dir_str.to_string());
-            self.run_sandboxed(runner, &sandbox, repo_dir, &configure, &extra_fs, true, None)?;
+            self.run_sandboxed(
+                runner, &sandbox, repo_dir, &configure, &extra_fs, true, None,
+            )?;
         }
 
         let ninja_cmd = vec![
@@ -619,14 +627,24 @@ impl<'a> FlatpakManager<'a> {
             "-C".to_string(),
             build_dir_str.to_string(),
         ];
-        self.run_sandboxed(runner, &sandbox, repo_dir, &ninja_cmd, &extra_fs, true, None)?;
+        self.run_sandboxed(
+            runner, &sandbox, repo_dir, &ninja_cmd, &extra_fs, true, None,
+        )?;
         let install_cmd = vec![
             "ninja".to_string(),
             "-C".to_string(),
             build_dir_str.to_string(),
             "install".to_string(),
         ];
-        self.run_sandboxed(runner, &sandbox, repo_dir, &install_cmd, &extra_fs, true, None)
+        self.run_sandboxed(
+            runner,
+            &sandbox,
+            repo_dir,
+            &install_cmd,
+            &extra_fs,
+            true,
+            None,
+        )
     }
 
     fn run_simple(

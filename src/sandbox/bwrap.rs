@@ -65,11 +65,7 @@ impl BwrapRunner {
 
         // Multi-arch SDK layouts often provide lib64.
         if self.usr_files.join("lib64").is_dir() {
-            args.extend([
-                "--symlink".into(),
-                "usr/lib64".into(),
-                "/lib64".into(),
-            ]);
+            args.extend(["--symlink".into(), "usr/lib64".into(), "/lib64".into()]);
         }
 
         // Writable tmpfs /etc so we can add host resolv.conf (cannot overlay files onto a
@@ -95,21 +91,13 @@ impl BwrapRunner {
                         continue;
                     }
                     let dest = format!("/etc/{name_str}");
-                    args.extend([
-                        "--ro-bind-try".into(),
-                        path_to_str(&src)?.into(),
-                        dest,
-                    ]);
+                    args.extend(["--ro-bind-try".into(), path_to_str(&src)?.into(), dest]);
                 }
             }
         }
         for host_file in ["/etc/resolv.conf", "/etc/hosts"] {
             if Path::new(host_file).exists() {
-                args.extend([
-                    "--ro-bind-try".into(),
-                    host_file.into(),
-                    host_file.into(),
-                ]);
+                args.extend(["--ro-bind-try".into(), host_file.into(), host_file.into()]);
             }
         }
 
@@ -130,7 +118,8 @@ impl BwrapRunner {
             "/app/lib".into(),
             "--setenv".into(),
             "PKG_CONFIG_PATH".into(),
-            "/app/lib/pkgconfig:/app/share/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig".into(),
+            "/app/lib/pkgconfig:/app/share/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig"
+                .into(),
             "--setenv".into(),
             "XDG_DATA_DIRS".into(),
             "/app/share:/usr/share:/usr/share/runtime/share".into(),
@@ -192,11 +181,7 @@ impl BwrapRunner {
             } else if let Some(rest) = fs.strip_prefix("--bind-mount=") {
                 if let Some((dest, src)) = rest.split_once('=') {
                     if Path::new(src).exists() {
-                        args.extend([
-                            "--bind".into(),
-                            src.into(),
-                            dest.into(),
-                        ]);
+                        args.extend(["--bind".into(), src.into(), dest.into()]);
                     }
                 }
             } else if let Some(rest) = fs.strip_prefix("--bind=") {
@@ -305,9 +290,10 @@ impl SandboxRunner for BwrapRunner {
             if cwd.exists() {
                 let canon = cwd.canonicalize().unwrap_or_else(|_| cwd.clone());
                 let s = path_to_str(&canon)?;
-                if !args.windows(3).any(|w| {
-                    w[0] == "--bind" && (w[1] == s || w[2] == s)
-                }) {
+                if !args
+                    .windows(3)
+                    .any(|w| w[0] == "--bind" && (w[1] == s || w[2] == s))
+                {
                     args.extend(["--bind".into(), s.into(), s.into()]);
                 }
                 args.extend(["--chdir".into(), s.into()]);

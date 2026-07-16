@@ -138,7 +138,9 @@ fn query_a11y_bus_address() -> Result<String> {
     match query_a11y_bus_address_zbus() {
         Ok(address) => Ok(address),
         Err(zbus_error) => {
-            verbose(format!("zbus a11y query failed ({zbus_error:#}); trying gdbus"));
+            verbose(format!(
+                "zbus a11y query failed ({zbus_error:#}); trying gdbus"
+            ));
             query_a11y_bus_address_gdbus()
         }
     }
@@ -147,13 +149,8 @@ fn query_a11y_bus_address() -> Result<String> {
 fn query_a11y_bus_address_zbus() -> Result<String> {
     let conn = zbus::blocking::Connection::session()
         .context("Failed to connect to session bus for a11y")?;
-    let proxy = zbus::blocking::Proxy::new(
-        &conn,
-        "org.a11y.Bus",
-        "/org/a11y/bus",
-        "org.a11y.Bus",
-    )
-    .context("Failed to create a11y bus proxy")?;
+    let proxy = zbus::blocking::Proxy::new(&conn, "org.a11y.Bus", "/org/a11y/bus", "org.a11y.Bus")
+        .context("Failed to create a11y bus proxy")?;
     let address: String = proxy
         .call("GetAddress", &())
         .context("org.a11y.Bus.GetAddress failed")?;
@@ -331,9 +328,8 @@ pub fn move_file(src: &Path, dest: &Path) -> Result<()> {
             std::fs::remove_file(src).ok();
             Ok(())
         }
-        Err(error) => Err(error).with_context(|| {
-            format!("Failed to move {} -> {}", src.display(), dest.display())
-        }),
+        Err(error) => Err(error)
+            .with_context(|| format!("Failed to move {} -> {}", src.display(), dest.display())),
     }
 }
 

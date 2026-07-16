@@ -79,9 +79,13 @@ pub fn read_flatpak_version_from_lib() -> Option<String> {
     None
 }
 
-pub fn ensure_sdk_and_runtime(sdk: &str, runtime: &str, branch: &str) -> Result<(DeployedRef, DeployedRef)> {
-    let sdk_ref = find_deployed(sdk, branch)
-        .with_context(|| format!("SDK {sdk}//{branch} is required"))?;
+pub fn ensure_sdk_and_runtime(
+    sdk: &str,
+    runtime: &str,
+    branch: &str,
+) -> Result<(DeployedRef, DeployedRef)> {
+    let sdk_ref =
+        find_deployed(sdk, branch).with_context(|| format!("SDK {sdk}//{branch} is required"))?;
     let runtime_ref = find_deployed(runtime, branch)
         .with_context(|| format!("Runtime {runtime}//{branch} is required"))?;
     Ok((sdk_ref, runtime_ref))

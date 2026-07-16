@@ -24,13 +24,17 @@ pub fn update_dependencies(
 
     for module in modules_before_stop(manifest, stop_at)? {
         let Module::Object { name, sources, .. } = module else {
-            status_warn(format!("Skipping module reference during update: {module:?}"));
+            status_warn(format!(
+                "Skipping module reference during update: {module:?}"
+            ));
             continue;
         };
         let typed = Source::from_values(sources)?;
         // Directory-only modules (pointing at the project tree) need no download.
         if typed.iter().all(|s| matches!(s, Source::Dir { .. })) {
-            verbose(format!("Module {name}: dir sources only, nothing to download"));
+            verbose(format!(
+                "Module {name}: dir sources only, nothing to download"
+            ));
             continue;
         }
         let source_dir = build_dir.join(name);
@@ -75,8 +79,7 @@ pub fn build_dependencies(
 
         status(format!("Building module {name}..."));
         let typed = Source::from_values(sources)?;
-        let source_dir = if let Some(dir_path) = sources::resolve_dir_source(&typed, manifest_dir)
-        {
+        let source_dir = if let Some(dir_path) = sources::resolve_dir_source(&typed, manifest_dir) {
             // Prefer the live project/dir tree (no recursive copy into .flatplay).
             // Non-dir sources (files/archives) are materialized directly into that tree.
             let non_dir: Vec<_> = typed
@@ -272,11 +275,7 @@ fn build_meson(
     let source_s = path_to_str(&source_canon)?.to_string();
     let build_s = path_to_str(&module_build)?.to_string();
 
-    let mut setup = vec![
-        "meson".into(),
-        "setup".into(),
-        "--prefix=/app".into(),
-    ];
+    let mut setup = vec!["meson".into(), "setup".into(), "--prefix=/app".into()];
     setup.extend(config.iter().cloned());
     setup.push(source_s.clone());
     setup.push(build_s.clone());
@@ -301,12 +300,7 @@ fn build_meson(
     run_argv(
         runner,
         repo_dir,
-        &[
-            "meson".into(),
-            "install".into(),
-            "-C".into(),
-            build_s,
-        ],
+        &["meson".into(), "install".into(), "-C".into(), build_s],
         env_pairs,
         path_overrides,
         None,
@@ -361,12 +355,7 @@ fn build_cmake(
     run_argv(
         runner,
         repo_dir,
-        &[
-            "ninja".into(),
-            "-C".into(),
-            build_s,
-            "install".into(),
-        ],
+        &["ninja".into(), "-C".into(), build_s, "install".into()],
         env_pairs,
         path_overrides,
         None,
@@ -456,10 +445,7 @@ fn build_autotools(
         let module_build = build_dir.join(format!("_build-{name}"));
         std::fs::create_dir_all(&module_build)?;
         let build_s = path_to_str(&module_build)?;
-        let mut configure = vec![
-            format!("{source_s}/configure"),
-            "--prefix=/app".into(),
-        ];
+        let mut configure = vec![format!("{source_s}/configure"), "--prefix=/app".into()];
         configure.extend(config.iter().cloned());
         run_argv(
             runner,
@@ -473,22 +459,14 @@ fn build_autotools(
         run_argv(
             runner,
             repo_dir,
-            &[
-                "make".into(),
-                "V=0".into(),
-                jobs.clone(),
-                "install".into(),
-            ],
+            &["make".into(), "V=0".into(), jobs.clone(), "install".into()],
             env_pairs,
             path_overrides,
             Some(&module_build),
             workspace,
         )?;
     } else {
-        let mut configure = vec![
-            format!("{source_s}/configure"),
-            "--prefix=/app".into(),
-        ];
+        let mut configure = vec![format!("{source_s}/configure"), "--prefix=/app".into()];
         configure.extend(config.iter().cloned());
         run_argv(
             runner,

@@ -51,9 +51,7 @@ pub fn fetch_git_source(source_dir: &Path, name: &str, git_ref: GitRef<'_>) -> R
             clone_repository(git_ref.url, source_dir, Some(branch))?
         }
         (None, None, None) => {
-            anyhow::bail!(
-                "Git source in module '{name}' must specify one of: tag, commit, branch"
-            );
+            anyhow::bail!("Git source in module '{name}' must specify one of: tag, commit, branch");
         }
     };
 
@@ -66,7 +64,11 @@ pub fn fetch_git_source(source_dir: &Path, name: &str, git_ref: GitRef<'_>) -> R
     Ok(())
 }
 
-fn clone_repository(url: &str, source_dir: &Path, branch_or_tag: Option<&str>) -> Result<Repository> {
+fn clone_repository(
+    url: &str,
+    source_dir: &Path,
+    branch_or_tag: Option<&str>,
+) -> Result<Repository> {
     let mut builder = RepoBuilder::new();
     let mut fetch_opts = FetchOptions::new();
     // Depth is only applied for tip refs; arbitrary commits need a full fetch history.
@@ -98,14 +100,12 @@ fn update_submodules(repo: &Repository) -> Result<()> {
     fn update_recursive(repo: &Repository) -> Result<()> {
         for mut submodule in repo.submodules().context("Failed to list submodules")? {
             let mut opts = SubmoduleUpdateOptions::new();
-            submodule
-                .update(true, Some(&mut opts))
-                .with_context(|| {
-                    format!(
-                        "Failed to update submodule {}",
-                        submodule.name().unwrap_or("<unknown>")
-                    )
-                })?;
+            submodule.update(true, Some(&mut opts)).with_context(|| {
+                format!(
+                    "Failed to update submodule {}",
+                    submodule.name().unwrap_or("<unknown>")
+                )
+            })?;
             if let Ok(sub_repo) = submodule.open() {
                 update_recursive(&sub_repo)?;
             }

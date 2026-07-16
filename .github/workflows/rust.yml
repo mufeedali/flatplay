@@ -1,28 +1,90 @@
-name: Rust
+name: CI
 
 on:
   push:
     branches: ["main"]
+    tags: ["v*"]
   pull_request:
     branches: ["main"]
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
 
 permissions:
   contents: read
 
 jobs:
-  build:
+  ci:
+    name: fmt · clippy · test · build
     runs-on: ubuntu-latest
-
     steps:
-      - uses: actions/checkout@v6
-      - name: Check formatting
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format
         run: cargo fmt --check
-      - name: Run clippy
-        run: cargo clippy -- -D warnings
-      - name: Build
-        run: cargo build --verbose
-      - name: Run tests
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
         run: cargo test --verbose
+
+      - name: Debug build
+        run: cargo build --verbose
+
+  linux-binary:
+    name: Linux x86_64 binary
+    needs: ci
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Release build
+        run: cargo build --release --verbose
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          install -m 755 target/release/flatplay dist/flatplay-linux-x86_64
+          (cd dist && sha256sum flatplay-linux-x86_64 > flatplay-linux-x86_64.sha256)
+          ls -la dist/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: flatplay-linux-x86_64
+          path: |
+            dist/flatplay-linux-x86_64
+            dist/flatplay-linux-x86_64.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/flatplay-linux-x86_64
+            dist/flatplay-linux-x86_64.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
