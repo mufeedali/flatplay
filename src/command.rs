@@ -1,5 +1,9 @@
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
+
+#[cfg(unix)]
+use std::os::unix::process::ExitStatusExt;
 
 use crate::utils::{command_header, verbose};
 use anyhow::Result;
@@ -23,11 +27,6 @@ fn is_sandboxed() -> bool {
     Path::new("/.flatpak-info").exists()
 }
 
-// Returns true if running inside a container like Toolbx or distrobox.
-fn is_inside_container() -> bool {
-    Path::new("/run/.containerenv").exists()
-}
-
 fn command_succeeds(cmd: &str, args: &[&str]) -> bool {
     Command::new(cmd)
         .args(args)
@@ -37,39 +36,54 @@ fn command_succeeds(cmd: &str, args: &[&str]) -> bool {
         .is_ok_and(|s| s.success())
 }
 
-// Runs a command, handling Flatpak sandbox and container specifics.
-pub fn run_command(command: &str, args: &[&str], working_dir: Option<&Path>) -> Result<()> {
-    let mut command_args = args.to_vec();
+/// How to escape a Flatpak sandbox when flatplay itself runs inside one.
+#[derive(Clone, Copy, Debug)]
+enum HostEscape {
+    None,
+    HostSpawn,
+    FlatpakSpawn,
+}
 
-    // Workaround for rofiles-fuse issues in containers.
-    if command == "flatpak-builder"
-        && is_inside_container()
-        && !command_args.contains(&"--disable-rofiles-fuse")
-    {
-        verbose("Detected container, adding --disable-rofiles-fuse");
-        command_args.push("--disable-rofiles-fuse");
-    }
-
-    let (program, final_args) = if is_sandboxed() {
+fn host_escape() -> HostEscape {
+    static ESCAPE: OnceLock<HostEscape> = OnceLock::new();
+    *ESCAPE.get_or_init(|| {
+        if !is_sandboxed() {
+            return HostEscape::None;
+        }
         if command_succeeds("host-spawn", &["--version"]) {
             verbose("Detected Flatpak sandbox, using host-spawn");
-            let mut new_args = vec![command];
-            new_args.extend_from_slice(&command_args);
-            ("host-spawn", new_args)
+            HostEscape::HostSpawn
         } else {
             verbose("Detected Flatpak sandbox, using flatpak-spawn");
+            HostEscape::FlatpakSpawn
+        }
+    })
+}
+
+fn resolve_host_argv<'a>(command: &'a str, args: &'a [&'a str]) -> (&'a str, Vec<&'a str>) {
+    match host_escape() {
+        HostEscape::None => (command, args.to_vec()),
+        HostEscape::HostSpawn => {
+            let mut new_args = vec![command];
+            new_args.extend_from_slice(args);
+            ("host-spawn", new_args)
+        }
+        HostEscape::FlatpakSpawn => {
             let mut new_args = vec![
                 "--host",
                 "--watch-bus",
                 "--env=TERM=xterm-256color",
                 command,
             ];
-            new_args.extend_from_slice(&command_args);
+            new_args.extend_from_slice(args);
             ("flatpak-spawn", new_args)
         }
-    } else {
-        (command, command_args)
-    };
+    }
+}
+
+/// Runs a host command, escaping a Flatpak sandbox via host-spawn / flatpak-spawn when needed.
+pub fn run_command(command: &str, args: &[&str], working_dir: Option<&Path>) -> Result<()> {
+    let (program, final_args) = resolve_host_argv(command, args);
 
     command_header(program, &final_args);
     let mut cmd = Command::new(program);
@@ -92,7 +106,6 @@ pub fn run_command(command: &str, args: &[&str], working_dir: Option<&Path>) -> 
             || {
                 #[cfg(unix)]
                 {
-                    use std::os::unix::process::ExitStatusExt;
                     format!("signal {}", status.signal().unwrap_or(0))
                 }
                 #[cfg(not(unix))]
@@ -108,4 +121,23 @@ pub fn run_command(command: &str, args: &[&str], working_dir: Option<&Path>) -> 
     Ok(())
 }
 
-// Legacy helper removed: dependency builds are in-process (see `builder` + `sandbox::BwrapRunner`).
+/// Capture stdout of a host command (with the same sandbox escape as `run_command`).
+pub fn run_command_output(command: &str, args: &[&str]) -> Result<std::process::Output> {
+    let (program, final_args) = resolve_host_argv(command, args);
+    command_header(program, &final_args);
+    Command::new(program)
+        .args(&final_args)
+        .output()
+        .map_err(Into::into)
+}
+
+/// True if the host can run `command` (sandbox-aware).
+pub fn host_command_exists(command: &str, probe_args: &[&str]) -> bool {
+    let (program, final_args) = resolve_host_argv(command, probe_args);
+    Command::new(program)
+        .args(&final_args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}

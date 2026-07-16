@@ -1,8 +1,9 @@
 use anyhow::Context;
 use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::generate;
 use nix::unistd::{getpid, setpgid};
 use std::path::PathBuf;
-use std::process::{Command, ExitCode, Stdio};
+use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 mod build_dirs;
@@ -55,9 +56,9 @@ enum Commands {
     UpdateDependencies,
     /// Clean the Flatpak repo directory
     Clean,
-    /// Spawn a new terminal inside the specified SDK
+    /// Spawn a shell with app finish-args (no devel / build path overrides)
     RuntimeTerminal,
-    /// Spawn a new terminal inside the current build repository
+    /// Spawn a SDK/build shell (`--allow=devel`, path overrides, network)
     BuildTerminal,
     /// Export .flatpak bundle from the build
     ExportBundle,
@@ -97,27 +98,11 @@ fn get_base_dir() -> anyhow::Result<PathBuf> {
 }
 
 fn check_dependencies() -> anyhow::Result<()> {
-    // Control plane: bubblewrap only. Flatpak *runtimes/SDKs* must exist on disk
-    // (user/system install tree); we never invoke the `flatpak` or `flatpak-builder` CLIs.
-    let mut missing = Vec::new();
-
-    if Command::new("bwrap")
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_err()
-    {
-        missing.push("bubblewrap (bwrap)");
+    // Control plane: `flatpak` CLI for sandbox/lifecycle. Module builds are in-process
+    // (no `flatpak-builder`). SDKs/runtimes must be installed via Flatpak.
+    if !crate::command::host_command_exists("flatpak", &["--version"]) {
+        return Err(anyhow::anyhow!("Missing required dependency: flatpak"));
     }
-
-    if !missing.is_empty() {
-        return Err(anyhow::anyhow!(
-            "Missing required dependencies: {}",
-            missing.join(", ")
-        ));
-    }
-
     Ok(())
 }
 
@@ -190,7 +175,6 @@ fn main() -> ExitCode {
 
     match cli.command {
         Some(Commands::Completions { shell }) => {
-            use clap_complete::generate;
             let mut cmd = Cli::command();
             generate(shell, &mut cmd, "flatplay", &mut std::io::stdout());
             ExitCode::SUCCESS

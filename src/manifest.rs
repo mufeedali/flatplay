@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use walkdir::WalkDir;
 
 pub fn is_valid_dbus_name(name: &str) -> bool {
     if name.is_empty() || name.len() > 255 {
@@ -63,6 +64,9 @@ pub enum Module {
         post_install: Option<Vec<String>>,
         #[serde(default)]
         sources: Vec<serde_json::Value>,
+        /// Nested modules (flatpak-builder module files often group children here).
+        #[serde(default)]
+        modules: Vec<Module>,
     },
     Reference(String),
 }
@@ -148,6 +152,8 @@ impl Manifest {
         let m_prepend_pkg = module_build_options.and_then(|b| b.prepend_pkg_config_path.as_deref());
         let m_append_pkg = module_build_options.and_then(|b| b.append_pkg_config_path.as_deref());
 
+        // Only inject PATH/LD/PKG_CONFIG when the manifest or module asks for
+        // prepend/append. Always replacing hides SDK extension bins.
         if let Some(arg) = Self::build_path_override(
             "PATH",
             &["/app/bin", "/usr/bin"],
@@ -189,48 +195,27 @@ impl Manifest {
         overrides
     }
 
+    /// Last buildable module after expanding nested/referenced modules.
     pub fn application_module(&self, manifest_path: &Path) -> Result<Module> {
-        match self.modules.last() {
-            Some(module @ Module::Object { .. }) => Ok(module.clone()),
-            Some(Module::Reference(ref_name)) => {
-                let parent = manifest_path
-                    .parent()
-                    .context("Manifest path has no parent directory")?;
-                let ref_path = parent.join(ref_name);
-                let modules = Self::load_module_file(&ref_path)?;
-                match modules.into_iter().last() {
-                    Some(module @ Module::Object { .. }) => Ok(module),
-                    Some(Module::Reference(name)) => Err(anyhow::anyhow!(
-                        "Nested module references not supported: {ref_name} -> {name}"
-                    )),
-                    None => Err(anyhow::anyhow!(
-                        "Referenced module file {ref_name} contains no modules"
-                    )),
-                }
-            }
-            None => Err(anyhow::anyhow!("Manifest has no modules")),
-        }
+        let parent = manifest_path
+            .parent()
+            .context("Manifest path has no parent directory")?;
+        let expanded = Self::expand_modules(&self.modules, parent)?;
+        expanded
+            .into_iter()
+            .rev()
+            .find(|m| matches!(m, Module::Object { .. }))
+            .context("Manifest has no buildable application module")
     }
 
     pub fn last_module_name(&self, manifest_path: &Path) -> Result<String> {
-        match self.modules.last() {
-            Some(Module::Object { name, .. }) => Ok(name.clone()),
-            Some(Module::Reference(ref_name)) => {
-                let parent = manifest_path
-                    .parent()
-                    .context("Manifest path has no parent directory")?;
-                let ref_path = parent.join(ref_name);
-                let modules = Self::load_module_file(&ref_path)?;
-                match modules.into_iter().last() {
-                    Some(Module::Object { name, .. }) => Ok(name),
-                    _ => Ok(ref_name.clone()),
-                }
-            }
-            None => Err(anyhow::anyhow!("Manifest has no modules")),
+        match self.application_module(manifest_path)? {
+            Module::Object { name, .. } => Ok(name),
+            Module::Reference(name) => Ok(name),
         }
     }
 
-    fn load_module_file(path: &Path) -> Result<Vec<Module>> {
+    pub fn load_module_file(path: &Path) -> Result<Vec<Module>> {
         let content = fs::read_to_string(path)?;
         let modules: Vec<Module> = match path.extension().and_then(|s| s.to_str()) {
             Some("json") => serde_json::from_str(&content)
@@ -248,6 +233,57 @@ impl Manifest {
         Ok(modules)
     }
 
+    /// Flatten module references and nested `modules` arrays (as flatpak-builder does).
+    pub fn expand_modules(modules: &[Module], manifest_dir: &Path) -> Result<Vec<Module>> {
+        let mut out = Vec::new();
+        for module in modules {
+            match module {
+                Module::Reference(ref_name) => {
+                    let ref_path = manifest_dir.join(ref_name);
+                    let loaded = Self::load_module_file(&ref_path)?;
+                    let nested_dir = ref_path
+                        .parent()
+                        .map_or_else(|| manifest_dir.to_path_buf(), Path::to_path_buf);
+                    out.extend(Self::expand_modules(&loaded, &nested_dir)?);
+                }
+                Module::Object {
+                    name,
+                    buildsystem,
+                    build_commands,
+                    sources,
+                    modules: nested,
+                    ..
+                } if !nested.is_empty() => {
+                    // Grouping module: expand children first (usual pattern for
+                    // pypi-dependencies.json), then the parent only if it has its own work.
+                    out.extend(Self::expand_modules(nested, manifest_dir)?);
+                    let parent_has_work = !sources.is_empty()
+                        || build_commands
+                            .as_ref()
+                            .is_some_and(|commands| !commands.is_empty())
+                        || buildsystem.as_ref().is_some_and(|bs| bs != "simple");
+                    if parent_has_work {
+                        let mut parent = module.clone();
+                        if let Module::Object {
+                            modules: parent_nested,
+                            ..
+                        } = &mut parent
+                        {
+                            parent_nested.clear();
+                        }
+                        out.push(parent);
+                    } else {
+                        crate::utils::verbose(format!(
+                            "Expanded grouping module '{name}' to its nested modules only"
+                        ));
+                    }
+                }
+                other => out.push(other.clone()),
+            }
+        }
+        Ok(out)
+    }
+
     fn build_path_override(
         var: &str,
         defaults: &[&str],
@@ -258,6 +294,14 @@ impl Manifest {
     ) -> Option<String> {
         // Do not inject host PATH/LD_LIBRARY_PATH/PKG_CONFIG_PATH into the sandbox;
         // host libraries cause subtle link failures inside the SDK.
+        // Only emit when prepend/append is set so we do not clobber the SDK env.
+        let has_override = manifest_prepend.is_some()
+            || module_prepend.is_some()
+            || manifest_append.is_some()
+            || module_append.is_some();
+        if !has_override {
+            return None;
+        }
         let parts: Vec<&str> = manifest_prepend
             .into_iter()
             .chain(module_prepend)
@@ -265,18 +309,41 @@ impl Manifest {
             .chain(manifest_append)
             .chain(module_append)
             .collect();
-        if parts.is_empty() {
-            return None;
-        }
         Some(format!("--env={var}={}", parts.join(":")))
     }
+}
+
+/// Best-effort directories to skip while scanning for manifests (not exhaustive).
+const MANIFEST_SCAN_SKIP_DIRS: &[&str] = &[
+    "node_modules",
+    "target",
+    "vendor",
+    "_build",
+    "build",
+    "dist",
+    ".flatplay",
+    "__pycache__",
+    ".venv",
+    "venv",
+    ".tox",
+    ".git",
+    ".cargo",
+    ".npm",
+    ".cache",
+];
+
+/// Cheap prefilter: file text looks like a Flatpak manifest before full parse.
+fn looks_like_manifest(content: &str) -> bool {
+    let head = content.get(..4096).unwrap_or(content);
+    head.contains("app-id")
+        || head.contains("\"app_id\"")
+        || head.contains("app_id")
+        || (head.contains("runtime") && head.contains("sdk") && head.contains("modules"))
 }
 
 /// Recursively finds manifest files in the given path, optionally excluding a prefix subtree.
 /// Returns a sorted Vec of manifest file paths, prioritizing ".Devel." manifests and shallower paths.
 pub fn find_manifests_in_path(path: &Path, exclude_prefix: Option<&Path>) -> Vec<PathBuf> {
-    use walkdir::WalkDir;
-
     let mut manifests = vec![];
 
     let path = match path.canonicalize() {
@@ -300,39 +367,59 @@ pub fn find_manifests_in_path(path: &Path, exclude_prefix: Option<&Path>) -> Vec
         }
     });
 
-    const SKIP_DIRS: &[&str] = &[
-        "node_modules",
-        "target",
-        "vendor",
-        "_build",
-        "build",
-        "dist",
-        ".flatplay",
-        "__pycache__",
-        ".venv",
-        "venv",
-        ".tox",
-        ".git",
-    ];
+    // Prefer conventional shallow locations first (still validated as manifests).
+    for rel in ["", "build-aux", "flatpak", "data"] {
+        let dir = if rel.is_empty() {
+            path.clone()
+        } else {
+            path.join(rel)
+        };
+        if !dir.is_dir() {
+            continue;
+        }
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if !p.is_file() {
+                    continue;
+                }
+                if !matches!(
+                    p.extension().and_then(|s| s.to_str()),
+                    Some("json" | "yaml" | "yml")
+                ) {
+                    continue;
+                }
+                if try_push_manifest(&mut manifests, &p) {
+                    // keep collecting
+                }
+            }
+        }
+    }
 
-    let walker = WalkDir::new(&path).into_iter().filter_entry(|entry| {
-        if entry.depth() == 0 {
-            return true;
-        }
-        let name = entry.file_name().to_string_lossy();
-        if name.starts_with('.') {
-            return false;
-        }
-        if entry.file_type().is_dir() && SKIP_DIRS.iter().any(|d| *d == name) {
-            return false;
-        }
-        if let Some(prefix) = &exclude_prefix
-            && entry.path().starts_with(prefix)
-        {
-            return false;
-        }
-        true
-    });
+    let walker = WalkDir::new(&path)
+        .max_depth(6)
+        .into_iter()
+        .filter_entry(|entry| {
+            if entry.depth() == 0 {
+                return true;
+            }
+            let name = entry.file_name().to_string_lossy();
+            // Skip VCS/tooling dirs; allow other hidden dirs (e.g. project-specific).
+            if entry.file_type().is_dir() {
+                if name == ".git" || name == ".flatplay" || name == ".tox" || name == ".cargo" {
+                    return false;
+                }
+                if MANIFEST_SCAN_SKIP_DIRS.iter().any(|d| *d == name) {
+                    return false;
+                }
+            }
+            if let Some(prefix) = &exclude_prefix
+                && entry.path().starts_with(prefix)
+            {
+                return false;
+            }
+            true
+        });
 
     for entry_result in walker {
         let entry = match entry_result {
@@ -351,9 +438,7 @@ pub fn find_manifests_in_path(path: &Path, exclude_prefix: Option<&Path>) -> Vec
         ) {
             continue;
         }
-        if Manifest::from_file(entry.path()).is_ok() {
-            manifests.push(entry.into_path());
-        }
+        try_push_manifest(&mut manifests, entry.path());
     }
 
     manifests.sort_by(|a, b| {
@@ -363,13 +448,34 @@ pub fn find_manifests_in_path(path: &Path, exclude_prefix: Option<&Path>) -> Vec
             .cmp(&a_is_devel)
             .then_with(|| a.components().count().cmp(&b.components().count()))
     });
+    manifests.dedup();
 
     manifests
+}
+
+fn try_push_manifest(manifests: &mut Vec<PathBuf>, path: &Path) -> bool {
+    if manifests.iter().any(|p| p == path) {
+        return false;
+    }
+    let Ok(content) = fs::read_to_string(path) else {
+        return false;
+    };
+    if !looks_like_manifest(&content) {
+        return false;
+    }
+    if Manifest::from_file(path).is_ok() {
+        manifests.push(path.to_path_buf());
+        true
+    } else {
+        false
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn test_is_valid_dbus_name() {
@@ -390,9 +496,6 @@ mod tests {
 
     #[test]
     fn test_manifest_parsing_json() {
-        use std::io::Write;
-        use tempfile::NamedTempFile;
-
         let manifest_content = r#"{
             "app-id": "org.example.TestApp",
             "sdk": "org.gnome.Sdk",
@@ -427,9 +530,6 @@ mod tests {
 
     #[test]
     fn test_manifest_parsing_yaml() {
-        use std::io::Write;
-        use tempfile::NamedTempFile;
-
         let manifest_content = r#"
 app-id: org.example.TestApp
 sdk: org.gnome.Sdk
@@ -456,9 +556,6 @@ finish-args:
 
     #[test]
     fn test_manifest_invalid_app_id() {
-        use std::io::Write;
-        use tempfile::NamedTempFile;
-
         let manifest_content = r#"{
             "app-id": "invalid",
             "sdk": "org.gnome.Sdk",

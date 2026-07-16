@@ -4,6 +4,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::env;
 use std::fmt::Write;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
@@ -71,7 +72,10 @@ pub fn get_host_env() -> HashMap<String, String> {
         "XDG_SESSION_ID",
         "XDG_SESSION_TYPE",
         "XDG_VTNR",
+        "XDG_RUNTIME_DIR",
+        "DBUS_SESSION_BUS_ADDRESS",
         "AT_SPI_BUS_ADDRESS",
+        "HOME",
         "LANG",
         "LANGUAGE",
         "LC_ALL",
@@ -285,8 +289,6 @@ pub fn download_file(url: &str, dest: &Path) -> Result<()> {
 }
 
 pub fn verify_sha256_hex(path: &Path, expected: &str) -> Result<()> {
-    use std::io::Read;
-
     let mut file = std::fs::File::open(path)
         .with_context(|| format!("Failed to open {} for hashing", path.display()))?;
     let mut hasher = Sha256::new();
@@ -654,11 +656,5 @@ mod tests {
         move_file(&src, &dest).unwrap();
         assert!(!src.exists());
         assert_eq!(std::fs::read(&dest).unwrap(), b"data");
-    }
-
-    #[test]
-    fn test_shell_words_roundtrip_quotes() {
-        let argv = shell_words::split(r#"echo "hello world" '--flag=a b'"#).unwrap();
-        assert_eq!(argv, ["echo", "hello world", "--flag=a b"]);
     }
 }

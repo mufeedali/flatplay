@@ -4,6 +4,7 @@ mod cache;
 
 pub use cache::DownloadCache;
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -309,25 +310,9 @@ fn materialize_one(
                 "Using directory source for {module_name}: {}",
                 src.display()
             ));
-            // Prefer lightweight presence: if target is empty module dir and path is project
-            // root, leave a marker file with the resolved path for buildsystems to read.
-            // For dependency builds that need full tree, copy (can be large).
-            if target
-                .read_dir()
-                .map(|mut d| d.next().is_none())
-                .unwrap_or(true)
-                && source_is_module_root(target)
-            {
-                std::fs::write(
-                    target.join(".flatplay-dir-source"),
-                    src.canonicalize()
-                        .unwrap_or(src)
-                        .to_string_lossy()
-                        .as_bytes(),
-                )?;
-            } else {
-                copy_dir_all(&src, target)?;
-            }
+            // Prefer live trees via resolve_dir_source at build time. When a dir
+            // source is materialized into the module tree, copy the contents.
+            copy_dir_all(&src, target)?;
         }
         Source::Patch { path, .. } => {
             let patch_path = resolve_path(manifest_dir, path);
@@ -340,13 +325,6 @@ fn materialize_one(
     Ok(())
 }
 
-fn source_is_module_root(target: &Path) -> bool {
-    target
-        .file_name()
-        .and_then(|n| n.to_str())
-        .is_some_and(|n| !n.is_empty())
-}
-
 fn resolve_path(manifest_dir: &Path, path: &str) -> PathBuf {
     let p = Path::new(path);
     if p.is_absolute() {
@@ -357,23 +335,16 @@ fn resolve_path(manifest_dir: &Path, path: &str) -> PathBuf {
 }
 
 fn apply_patch(patch_path: &Path, target: &Path) -> Result<()> {
-    // Minimal unified-diff apply via `patch` if present; otherwise error with guidance.
-    // Prefer pure approach: read patch and use the `patch` crate — avoid host CLI.
-    // For Phase B we shell to `patch -p1` only when the binary exists; Wordbook has no patches.
-    let patch_body =
-        std::fs::read_to_string(patch_path).with_context(|| patch_path.display().to_string())?;
-    let _ = (patch_body, target);
-    // Try lib: apply with patch crate if we add it; for now use std process patch as last resort
-    // for rare manifests — documented limitation.
+    // Host `patch` CLI for rare manifests (no pure-Rust apply yet).
+    let data = std::fs::read(patch_path)
+        .with_context(|| format!("Failed to read patch {}", patch_path.display()))?;
     let status = std::process::Command::new("patch")
         .args(["-p1", "--forward", "--batch"])
         .current_dir(target)
         .stdin(std::process::Stdio::piped())
         .spawn()
         .and_then(|mut child| {
-            use std::io::Write;
             if let Some(stdin) = child.stdin.as_mut() {
-                let data = std::fs::read(patch_path)?;
                 stdin.write_all(&data)?;
             }
             child.wait()

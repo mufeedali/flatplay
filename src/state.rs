@@ -107,7 +107,7 @@ mod tests {
     #[test]
     fn test_state_reset() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let mut state = State::load(temp_dir.path().as_ref()).unwrap();
+        let mut state = State::load(temp_dir.path()).unwrap();
 
         state.dependencies_updated = true;
         state.dependencies_built = true;

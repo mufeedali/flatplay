@@ -769,7 +769,6 @@ dependencies = [
  "serde-saphyr",
  "serde_json",
  "sha2 0.11.0",
- "shell-words",
  "tar",
  "tempfile",
  "ureq",
